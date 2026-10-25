@@ -24,9 +24,6 @@ jobs:
         run: pip install cloudscraper beautifulsoup4
 
       - name: Run scraper script
-        env:
-          MONDAY_URL: "https://cocowest.ca/2026/10/costco-flyer-costco-sale-items-for-october-19-25-2026-2026-for-bc-ab-sk-mb/"
-          WEEKEND_URL: "https://cocowest.ca/2026/10/weekend-update-costco-sale-items-for-october-23-25-2026-for-bc-ab-sk-mb/"
         run: python script.py
 
       - name: Deploy to GitHub Pages
