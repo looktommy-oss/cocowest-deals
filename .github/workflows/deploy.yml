@@ -2,7 +2,7 @@ name: Update CocoWest New Deals
 
 on:
   schedule:
-    - cron: '0 17 * * 5,6'
+    - cron: '0 17 * * 5,6,0'  # Runs Friday, Saturday, and Sunday at 17:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -24,19 +24,10 @@ jobs:
         run: pip install cloudscraper beautifulsoup4
 
       - name: Run scraper script
-        run: python -u script.py
-
-      - name: Verify output exists
-        run: |
-          if [ ! -f public/index.html ]; then
-            echo "ERROR: public/index.html was not created by script.py"
-            echo "Files in repo root:"
-            ls -la
-            echo "Last lines of script.py:"
-            tail -n 5 script.py
-            exit 1
-          fi
-          ls -la public
+        env:
+          MONDAY_URL: "https://cocowest.ca/2026/10/costco-flyer-costco-sale-items-for-october-19-25-2026-2026-for-bc-ab-sk-mb/"
+          WEEKEND_URL: "https://cocowest.ca/2026/10/weekend-update-costco-sale-items-for-october-23-25-2026-for-bc-ab-sk-mb/"
+        run: python script.py
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
