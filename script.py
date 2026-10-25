@@ -481,7 +481,7 @@ PAGE_TEMPLATE = """<!doctype html>
   .search { max-width:1200px; margin:.5rem auto 0; display:flex; gap:.5rem; }
   .search input { flex:1; min-width:0; padding:.6rem .8rem; font-size:16px; border:1px solid var(--line); border-radius:10px;
                   background:var(--card); color:var(--fg); }
-  .toolbar { max-width:1200px; margin:0 auto; padding:0 .8rem .5rem; display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; }
+  .toolbar { max-width:1200px; margin:0 auto; padding:0 .8rem .6rem; display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; }
   .chip { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:999px; padding:.3rem .75rem;
           font-size:.85rem; font-weight:600; cursor:pointer; }
   .chip.active { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
@@ -490,10 +490,11 @@ PAGE_TEMPLATE = """<!doctype html>
   .seg { display:inline-flex; border:1px solid var(--line); border-radius:999px; overflow:hidden; }
   .seg button { border:none; background:var(--card); color:var(--fg); padding:.3rem .7rem; font-size:.85rem; font-weight:700; cursor:pointer; }
   .seg button.active { background:var(--accent); color:var(--on-accent); }
-  .meta { max-width:1200px; margin:0 auto; padding:.4rem .8rem .6rem; color:var(--muted); font-size:.8rem; line-height:1.5; border-top:1px solid var(--line); }
+  
+  .meta { max-width:1200px; margin:.6rem auto .4rem; padding:0 .8rem; color:var(--muted); font-size:.8rem; line-height:1.5; }
   .meta a { color:inherit; }
   
-  .grid { max-width:1200px; margin:.8rem auto; padding:0 .8rem; display:grid; gap:.8rem; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); }
+  .grid { max-width:1200px; margin:.6rem auto; padding:0 .8rem; display:grid; gap:.8rem; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); }
   .card { margin:0; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; position:relative;
           display:flex; flex-direction:column; justify-content:space-between; }
   .card.is-new { border:2px solid var(--highlight-border); background:var(--highlight); }
@@ -519,8 +520,7 @@ PAGE_TEMPLATE = """<!doctype html>
   @media (max-width:640px) {
     .cols-toggle { display:flex; }
     .toolbar { padding:0 .6rem .5rem; }
-    .grid { padding:0 .5rem; gap:.5rem; grid-template-columns:minmax(0,1fr); }
-    .grid.c2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .grid { padding:0 .5rem; gap:.5rem; grid-template-columns:repeat(2,minmax(0,1fr)); }
     .grid.c2 .card { border-radius:10px; }
     .grid.c2 .card figcaption { font-size:.72rem; padding:.4rem .45rem; }
     .grid.c2 .card-footer { padding:.35rem .45rem .5rem; font-size:.72rem; }
@@ -529,7 +529,7 @@ PAGE_TEMPLATE = """<!doctype html>
     .grid.c2 .clr-tag { right:5px; }
     .grid.c2 .end-badge { font-size:.65rem; padding:2px 6px; }
     .title { font-size:.95rem; }
-    .meta { padding:0 .6rem .6rem; }
+    .meta { padding:0 .6rem; }
   }
 </style>
 </head>
@@ -558,12 +558,12 @@ PAGE_TEMPLATE = """<!doctype html>
       </span>
     </div>
   </div>
-  <div class="meta">
-    📍 Store Location: <b>__LOCATION__</b><br>
-    Showing <b id="shown-count">__TOTAL__</b> of <b>__TOTAL__</b> weekend items (<b>__NEW_COUNT__</b> new exclusives highlighted) &middot; updated __STAMP__<br>
-    🏷️ Clearance price = ends in .97 &middot; end-date badges are measured from today (Costco weeks run Mon&ndash;Sun)<br>
-    Sources: <a href="__FLYER_URL__">Monday Flyer</a> &middot; <a href="__WEEKEND_URL__">Weekend Update</a>
-  </div>
+</div>
+<div class="meta">
+  📍 Store Location: <b>__LOCATION__</b><br>
+  Showing <b id="shown-count">__TOTAL__</b> of <b>__TOTAL__</b> weekend items (<b>__NEW_COUNT__</b> new exclusives highlighted) &middot; updated __STAMP__<br>
+  🏷️ Clearance price = ends in .97 &middot; end-date badges are measured from today (Costco weeks run Mon&ndash;Sun)<br>
+  Sources: <a href="__FLYER_URL__">Monday Flyer</a> &middot; <a href="__WEEKEND_URL__">Weekend Update</a>
 </div>
 <main class="grid c2" id="grid">
 __CARDS__
