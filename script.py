@@ -460,8 +460,18 @@ PAGE_TEMPLATE = """<!doctype html>
   html { -webkit-text-size-adjust:100%; }
   body { margin:0; background:var(--bg); color:var(--fg); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
          padding-bottom:3rem; padding-left:env(safe-area-inset-left,0px); padding-right:env(safe-area-inset-right,0px); }
-  .bar { position:sticky; top:0; z-index:10; background:var(--bar); -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px);
-         border-bottom:1px solid var(--line); padding:calc(.6rem + env(safe-area-inset-top,0px)) .8rem .6rem; }
+  
+  .sticky-header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--bar);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+  .bar { padding: .6rem .8rem .4rem; }
   .bar-row { max-width:1200px; margin:0 auto; display:flex; align-items:center; justify-content:space-between; gap:.6rem; }
   .title { font-size:1.05rem; font-weight:700; }
   .badge-btn { background:var(--accent); color:var(--on-accent); border:none; border-radius:999px; padding:.35rem .85rem;
@@ -471,7 +481,7 @@ PAGE_TEMPLATE = """<!doctype html>
   .search { max-width:1200px; margin:.5rem auto 0; display:flex; gap:.5rem; }
   .search input { flex:1; min-width:0; padding:.6rem .8rem; font-size:16px; border:1px solid var(--line); border-radius:10px;
                   background:var(--card); color:var(--fg); }
-  .toolbar { max-width:1200px; margin:.6rem auto 0; padding:0 .8rem; display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; }
+  .toolbar { max-width:1200px; margin:0 auto; padding:0 .8rem .5rem; display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; }
   .chip { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:999px; padding:.3rem .75rem;
           font-size:.85rem; font-weight:600; cursor:pointer; }
   .chip.active { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
@@ -480,9 +490,10 @@ PAGE_TEMPLATE = """<!doctype html>
   .seg { display:inline-flex; border:1px solid var(--line); border-radius:999px; overflow:hidden; }
   .seg button { border:none; background:var(--card); color:var(--fg); padding:.3rem .7rem; font-size:.85rem; font-weight:700; cursor:pointer; }
   .seg button.active { background:var(--accent); color:var(--on-accent); }
-  .meta { max-width:1200px; margin:.6rem auto .2rem; padding:0 .8rem; color:var(--muted); font-size:.8rem; line-height:1.5; }
+  .meta { max-width:1200px; margin:0 auto; padding:.4rem .8rem .6rem; color:var(--muted); font-size:.8rem; line-height:1.5; border-top:1px solid var(--line); }
   .meta a { color:inherit; }
-  .grid { max-width:1200px; margin:.6rem auto; padding:0 .8rem; display:grid; gap:.8rem; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); }
+  
+  .grid { max-width:1200px; margin:.8rem auto; padding:0 .8rem; display:grid; gap:.8rem; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); }
   .card { margin:0; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; position:relative;
           display:flex; flex-direction:column; justify-content:space-between; }
   .card.is-new { border:2px solid var(--highlight-border); background:var(--highlight); }
@@ -507,7 +518,7 @@ PAGE_TEMPLATE = """<!doctype html>
   .empty { padding:2rem 1rem; text-align:center; color:var(--muted); grid-column:1/-1; }
   @media (max-width:640px) {
     .cols-toggle { display:flex; }
-    .toolbar { padding:0 .6rem; }
+    .toolbar { padding:0 .6rem .5rem; }
     .grid { padding:0 .5rem; gap:.5rem; grid-template-columns:minmax(0,1fr); }
     .grid.c2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .grid.c2 .card { border-radius:10px; }
@@ -518,39 +529,41 @@ PAGE_TEMPLATE = """<!doctype html>
     .grid.c2 .clr-tag { right:5px; }
     .grid.c2 .end-badge { font-size:.65rem; padding:2px 6px; }
     .title { font-size:.95rem; }
-    .meta { padding:0 .6rem; }
+    .meta { padding:0 .6rem .6rem; }
   }
 </style>
 </head>
 <body>
-<header class="bar">
-  <div class="bar-row">
-    <div class="title">&#128717;&#65039; Costco Weekend Deals</div>
-    <button class="badge-btn" id="list-toggle" type="button">&#128722; List (0)</button>
+<div class="sticky-header">
+  <header class="bar">
+    <div class="bar-row">
+      <div class="title">&#128717;&#65039; Costco Weekend Deals</div>
+      <button class="badge-btn" id="list-toggle" type="button">&#128722; List (0)</button>
+    </div>
+    <div class="search">
+      <input id="q" type="search" placeholder="Filter by name or item number..." autocomplete="off">
+      <button class="badge-btn gray" id="reset-btn" type="button">Reset</button>
+    </div>
+  </header>
+  <div class="toolbar">
+    <button class="chip" id="new-toggle" type="button" aria-pressed="false">&#10024; New only (__NEW_COUNT__)</button>
+    <button class="chip" id="clr-toggle" type="button" aria-pressed="false">&#127991;&#65039; Clearance (__CLR_COUNT__)</button>
+    <button class="chip" id="week-toggle" type="button" aria-pressed="false">&#9200; Ends this week (0)</button>
+    <button class="chip danger" id="clear-list" type="button" hidden>Clear list</button>
+    <div class="cols-toggle">
+      <span>Per row</span>
+      <span class="seg">
+        <button type="button" data-cols="1" aria-pressed="false">1</button>
+        <button type="button" data-cols="2" aria-pressed="true">2</button>
+      </span>
+    </div>
   </div>
-  <div class="search">
-    <input id="q" type="search" placeholder="Filter by name or item number..." autocomplete="off">
-    <button class="badge-btn gray" id="reset-btn" type="button">Reset</button>
+  <div class="meta">
+    📍 Store Location: <b>__LOCATION__</b><br>
+    Showing <b id="shown-count">__TOTAL__</b> of <b>__TOTAL__</b> weekend items (<b>__NEW_COUNT__</b> new exclusives highlighted) &middot; updated __STAMP__<br>
+    🏷️ Clearance price = ends in .97 &middot; end-date badges are measured from today (Costco weeks run Mon&ndash;Sun)<br>
+    Sources: <a href="__FLYER_URL__">Monday Flyer</a> &middot; <a href="__WEEKEND_URL__">Weekend Update</a>
   </div>
-</header>
-<div class="toolbar">
-  <button class="chip" id="new-toggle" type="button" aria-pressed="false">&#10024; New only (__NEW_COUNT__)</button>
-  <button class="chip" id="clr-toggle" type="button" aria-pressed="false">&#127991;&#65039; .97 clearance (__CLR_COUNT__)</button>
-  <button class="chip" id="week-toggle" type="button" aria-pressed="false">&#9200; Ends this week (0)</button>
-  <button class="chip danger" id="clear-list" type="button" hidden>Clear list</button>
-  <div class="cols-toggle">
-    <span>Per row</span>
-    <span class="seg">
-      <button type="button" data-cols="1" aria-pressed="false">1</button>
-      <button type="button" data-cols="2" aria-pressed="true">2</button>
-    </span>
-  </div>
-</div>
-<div class="meta">
-  📍 Store Location: <b>__LOCATION__</b><br>
-  Showing <b id="shown-count">__TOTAL__</b> of <b>__TOTAL__</b> weekend items (<b>__NEW_COUNT__</b> new exclusives highlighted) &middot; updated __STAMP__<br>
-  &#127991;&#65039; .97 price = clearance &middot; end-date badges are measured from today (Costco weeks run Mon&ndash;Sun)<br>
-  Sources: <a href="__FLYER_URL__">Monday Flyer</a> &middot; <a href="__WEEKEND_URL__">Weekend Update</a>
 </div>
 <main class="grid c2" id="grid">
 __CARDS__
@@ -624,7 +637,7 @@ __CARDS__
     return n;
   }
   newBtn.innerHTML = '&#10024; New only (' + countWhere(function (el) { return el.classList.contains('is-new'); }) + ')';
-  clrBtn.innerHTML = '&#127991;&#65039; .97 clearance (' + countWhere(function (el) { return el.classList.contains('is-clr'); }) + ')';
+  clrBtn.innerHTML = '&#127991;&#65039; Clearance (' + countWhere(function (el) { return el.classList.contains('is-clr'); }) + ')';
   weekBtn.innerHTML = '&#9200; Ends this week (' + countWhere(function (el) { return el.getAttribute('data-week') === '1'; }) + ')';
 
   function inList(url) { return shoppingList.indexOf(url) !== -1; }
