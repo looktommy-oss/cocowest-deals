@@ -16,60 +16,60 @@ def get_post_items(url):
     )
     try:
         resp = scraper.get(url, timeout=20)
-        print(f"Fetching {url} -> Status: {resp.status_code}, Length: {len(resp.text)} bytes")
+        print(f"Fetching {url} -> Status: {resp.status_code}")
         if resp.status_code != 200:
             return []
         
         soup = BeautifulSoup(resp.text, 'html.parser')
-        
-        # Let's check all img tags on the entire page
-        all_imgs = soup.find_all('img')
-        print(f"Total <img> tags found on page: {len(all_imgs)}")
+        content = soup.find('div', class_=re.compile(r'entry-content|post-content')) or soup.find('article') or soup
         
         items = []
         seen_urls = set()
 
-        for i, img in enumerate(all_imgs):
-            alt = (img.get('alt') or '').strip()
-            src = (
-                img.get('data-src') or 
-                img.get('data-lazy-src') or 
-                img.get('data-orig-file') or 
-                img.get('src') or ''
-            )
-            if not src or 'data:image' in src:
-                srcset = img.get('srcset') or img.get('data-srcset') or ''
-                if srcset:
-                    src = srcset.split(',')[0].split(' ')[0]
+        def process_img(img_tag):
+            alt = (img_tag.get('alt') or '').strip()
+            
+            # Scan ALL attributes of the image tag for any URL containing uploads or wp-content
+            candidate_urls = []
+            for attr_name, attr_val in img_tag.attrs.items():
+                if isinstance(attr_val, str):
+                    if 'uploads' in attr_val or 'wp-content' in attr_val:
+                        candidate_urls.append(attr_val)
+                elif isinstance(attr_val, list):
+                    for val in attr_val:
+                        if isinstance(val, str) and ('uploads' in val or 'wp-content' in val):
+                            candidate_urls.append(val)
+            
+            for url_str in candidate_urls:
+                # Handle comma-separated srcset values if present
+                for part in url_str.split(','):
+                    clean_url = part.strip().split(' ')[0].split('?')[0]
+                    if ('uploads' in clean_url or 'wp-content' in clean_url) and not clean_url.endswith('.svg'):
+                        filename = clean_url.split('/')[-1].lower()
+                        rejected_keywords = ['logo', 'avatar', 'gravatar', 'header', 'banner', 'icon', 'badge', 'social', 'button', 'cocowest']
+                        
+                        if not any(k in filename for k in rejected_keywords):
+                            if clean_url not in seen_urls:
+                                seen_urls.add(clean_url)
+                                # Prefer alt text if it describes the product, otherwise fall back to filename
+                                identifier = alt if (alt and len(alt) > 3) else filename
+                                items.append({
+                                    'id': identifier,
+                                    'src': clean_url,
+                                    'alt': alt or 'Costco Deal'
+                                })
 
-            if not src:
-                continue
+        # 1. Process all img tags inside the article content
+        for img in content.find_all('img'):
+            process_img(img)
 
-            clean_src = src.split('?')[0]
-            filename = clean_src.split('/')[-1].lower()
+        # 2. Process all noscript tags (where WordPress lazy-load stores original images)
+        for noscript in content.find_all('noscript'):
+            ns_soup = BeautifulSoup(noscript.text, 'html.parser')
+            for img in ns_soup.find_all('img'):
+                process_img(img)
 
-            # Print first 5 images to inspect their structure
-            if i < 5:
-                print(f"  [Img {i}] src: {clean_src} | alt: {alt}")
-
-            if ('uploads' in clean_src or 'wp-content' in clean_src) and not clean_src.endswith('.svg'):
-                # Check filter keywords
-                rejected_keywords = ['logo', 'avatar', 'gravatar', 'header', 'banner', 'icon', 'badge', 'social', 'button']
-                matched_keyword = next((k for k in rejected_keywords if k in filename), None)
-                
-                if matched_keyword:
-                    # print(f"    -> Rejected by keyword '{matched_keyword}': {filename}")
-                    continue
-
-                if clean_src not in seen_urls:
-                    seen_urls.add(clean_src)
-                    items.append({
-                        'id': alt if alt else filename,
-                        'src': clean_src,
-                        'alt': alt or 'Costco Deal'
-                    })
-
-        print(f"Successfully extracted {len(items)} valid deal images after filtering.")
+        print(f"Successfully extracted {len(items)} valid deal images from {url}")
         return items
     except Exception as e:
         print(f"Error fetching {url}: {e}")
@@ -89,6 +89,7 @@ def main():
 
     monday_ids = {item['id'] for item in monday_data}
 
+    # Filter out items present on Monday
     new_deals = []
     seen = set()
     for item in weekend_data:
@@ -136,6 +137,26 @@ def main():
         f.write(html_page)
 
     print("Successfully created index.html!")
+
+    # Email Digest
+    sender_email = os.environ.get("MAIL_USERNAME")
+    receiver_email = os.environ.get("MAIL_TO")
+    app_password = os.environ.get("MAIL_PASSWORD")
+
+    if sender_email and receiver_email and app_password:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = f"🛒 {len(new_deals)} New CocoWest Weekend Deals!"
+        msg['From'] = sender_email
+        msg['To'] = receiver_email
+        msg.attach(MIMEText(html_page, 'html'))
+
+        try:
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+                server.login(sender_email, app_password)
+                server.sendmail(sender_email, receiver_email, msg.as_string())
+            print("Successfully sent email digest!")
+        except Exception as e:
+            print(f"Failed to send email: {e}")
 
 if __name__ == '__main__':
     main()
