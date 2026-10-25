@@ -24,6 +24,12 @@ jobs:
         run: pip install cloudscraper beautifulsoup4
 
       - name: Run scraper script
+        env:
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          MONDAY_URL: "https://cocowest.ca/2026/10/costco-flyer-costco-sale-items-for-october-19-25-2026-2026-for-bc-ab-sk-mb/"
+          WEEKEND_URL: "https://cocowest.ca/2026/10/weekend-update-costco-sale-items-for-october-23-25-2026-for-bc-ab-mb-sk/"
         run: python script.py
 
       - name: Deploy to GitHub Pages
