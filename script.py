@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Scrape CocoWest.ca for Costco posts with flexible post discovery, 
+Scrape CocoWest.ca for Costco posts with robust post discovery, 
 automatically showing the Monday/Sales flyer early in the week and switching 
 to Weekend Exclusives once the weekend post drops.
 Includes shopping list, store location, clearance tags, and end dates.
@@ -99,19 +99,10 @@ def is_post_link(href: str) -> bool:
         return False
     return not re.search(r"\.(jpe?g|png|gif|webp|pdf|xml)$", path, re.I)
 
-def extract_date_from_url(url: str):
-    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", url)
-    if m:
-        try:
-            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-        except ValueError:
-            pass
-    return None
-
 def discover_posts(home_html: str):
     soup = BeautifulSoup(home_html, "html.parser")
     seen = set()
-    posts = [] # list of tuples: (date, url, blob)
+    all_posts = []
 
     for a in soup.find_all("a", href=True):
         href = urljoin(BASE_URL, a["href"]).split("#")[0]
@@ -120,30 +111,28 @@ def discover_posts(home_html: str):
         seen.add(href)
         blob = " ".join([a.get_text(" ", strip=True), a.get("title", ""),
                          a.get("aria-label", ""), urlparse(href).path.replace("-", " ")])
-        
-        post_date = extract_date_from_url(href)
-        if not post_date:
-            continue
-        posts.append((post_date, href, blob))
-
-    # Sort descending by date
-    posts.sort(key=lambda x: x[0], reverse=True)
+        all_posts.append((href, blob))
 
     weekend_url = os.getenv("WEEKEND_URL")
     monday_url = os.getenv("MONDAY_URL")
-    
-    weekend_posts = [p for p in posts if WEEKEND_RE.search(p[2])]
-    general_posts = [p for p in posts if not WEEKEND_RE.search(p[2]) and not IGNORE_RE.search(p[2])]
 
-    if not weekend_url and weekend_posts:
-        weekend_url = weekend_posts[0][1]
+    if not weekend_url:
+        for href, blob in all_posts:
+            if WEEKEND_RE.search(blob):
+                weekend_url = href
+                break
 
-    if not monday_url and general_posts:
-        monday_url = general_posts[0][1]
+    if not monday_url:
+        for href, blob in all_posts:
+            if href == weekend_url:
+                continue
+            if IGNORE_RE.search(blob):
+                continue
+            monday_url = href
+            break
 
-    # Fallback if specific filters were too narrow
-    if not monday_url and posts:
-        monday_url = posts[0][1]
+    if not monday_url and all_posts:
+        monday_url = all_posts[0][0]
 
     return monday_url, weekend_url
 
