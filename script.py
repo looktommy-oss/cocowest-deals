@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Scrape CocoWest.ca for Costco posts with smart date-aware post discovery 
-(handles stat-holiday shifts to Tuesday), automatically showing the Monday Flyer 
-early in the week and switching to Weekend Exclusives once the weekend post drops.
+Scrape CocoWest.ca for Costco posts with flexible post discovery, 
+automatically showing the Monday/Sales flyer early in the week and switching 
+to Weekend Exclusives once the weekend post drops.
 Includes shopping list, store location, clearance tags, and end dates.
 
 Env overrides:
@@ -49,8 +49,8 @@ if SITE_URL and not SITE_URL.endswith("/"):
     SITE_URL += "/"
 STATE_URL = SITE_URL + "state.json" if SITE_URL else ""
 
-MONDAY_RE = re.compile(os.getenv("MONDAY_RE", r"flyer|sales|posts"), re.I)
 WEEKEND_RE = re.compile(os.getenv("WEEKEND_RE", r"weekend"), re.I)
+IGNORE_RE = re.compile(r"(seasonal|electronics|food[-_\s]review|review|recall|contest|clothing|executive|black[-_\s]friday|boxing[-_\s]day)", re.I)
 
 FUZZY_THRESHOLD = 0.92
 
@@ -111,8 +111,7 @@ def extract_date_from_url(url: str):
 def discover_posts(home_html: str):
     soup = BeautifulSoup(home_html, "html.parser")
     seen = set()
-    mondays = []  # list of tuples: (date, url)
-    weekends = [] # list of tuples: (date, url)
+    posts = [] # list of tuples: (date, url, blob)
 
     for a in soup.find_all("a", href=True):
         href = urljoin(BASE_URL, a["href"]).split("#")[0]
@@ -125,27 +124,26 @@ def discover_posts(home_html: str):
         post_date = extract_date_from_url(href)
         if not post_date:
             continue
-
-        if WEEKEND_RE.search(blob):
-            weekends.append((post_date, href))
-        elif MONDAY_RE.search(blob) and not WEEKEND_RE.search(blob) and "seasonal" not in blob.lower() and "electronics" not in blob.lower():
-            mondays.append((post_date, href))
+        posts.append((post_date, href, blob))
 
     # Sort descending by date
-    mondays.sort(key=lambda x: x[0], reverse=True)
-    weekends.sort(key=lambda x: x[0], reverse=True)
+    posts.sort(key=lambda x: x[0], reverse=True)
 
-    monday_url = os.getenv("MONDAY_URL") or (mondays[0][1] if mondays else None)
-    weekend_url = os.getenv("WEEKEND_URL") or (weekends[0][1] if weekends else None)
+    weekend_url = os.getenv("WEEKEND_URL")
+    monday_url = os.getenv("MONDAY_URL")
     
-    monday_date = mondays[0][0] if mondays else None
-    weekend_date = weekends[0][0] if weekends else None
+    weekend_posts = [p for p in posts if WEEKEND_RE.search(p[2])]
+    general_posts = [p for p in posts if not WEEKEND_RE.search(p[2]) and not IGNORE_RE.search(p[2])]
 
-    # If the latest weekend post is older than the latest Monday/Tuesday flyer post,
-    # it belongs to a previous week's cycle, so we suppress weekend mode until the new one drops.
-    if monday_date and weekend_date and weekend_date < monday_date:
-        print(f"[discover] Latest weekend post ({weekend_date.strftime('%Y-%m-%d')}) is older than or from the previous cycle relative to flyer ({monday_date.strftime('%Y-%m-%d')}); falling back to Monday flyer mode.")
-        weekend_url = None
+    if not weekend_url and weekend_posts:
+        weekend_url = weekend_posts[0][1]
+
+    if not monday_url and general_posts:
+        monday_url = general_posts[0][1]
+
+    # Fallback if specific filters were too narrow
+    if not monday_url and posts:
+        monday_url = posts[0][1]
 
     return monday_url, weekend_url
 
@@ -449,7 +447,7 @@ def maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, items_count,
         print("[email] not sending notification")
         return
 
-    mode_name = "Weekend Exclusives" if is_weekend_mode else "Monday/Flyer Sales"
+    mode_name = "Weekend Exclusives" if is_weekend_mode else "Monday Sales Post"
     lines = [
         f"CocoWest {mode_name} updated: {items_count} items found.",
         f"Browse them: {SITE_URL or '(site URL unknown)'}",
