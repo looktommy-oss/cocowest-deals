@@ -413,7 +413,6 @@ function filterCards() {
 
 document.getElementById('q').addEventListener('input', filterCards);
 
-// Initialize checkbox states from storage on load
 document.addEventListener('DOMContentLoaded', function() {
   updateShopCount();
   document.querySelectorAll('.shop-check').forEach(function(chk) {
@@ -469,7 +468,7 @@ def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     scraper = make_scraper()
 
-    monday_url, weekend_url = os.getenv("Monday_URL") or os.getenv("MONDAY_URL"), os.getenv("WEEKEND_URL")
+    monday_url, weekend_url = os.getenv("MONDAY_URL"), os.getenv("WEEKEND_URL")
     if not (monday_url and weekend_url):
         home = fetch(scraper, BASE_URL)
         monday_url, weekend_url = discover_posts(home)
