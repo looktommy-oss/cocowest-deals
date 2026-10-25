@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Scrape CocoWest.ca for the weekly Costco flyer post vs the Weekend Update post,
-display ALL weekend items with exclusive ones highlighted, include an interactive
-shopping list, store location parsed, flag Clearance prices and end dates, 
-and email you when a NEW weekend post shows up.
+Scrape CocoWest.ca for Costco posts with smart date-aware post discovery 
+(handles stat-holiday shifts to Tuesday), automatically showing the Monday Flyer 
+early in the week and switching to Weekend Exclusives once the weekend post drops.
+Includes shopping list, store location, clearance tags, and end dates.
 
 Env overrides:
   MONDAY_URL, WEEKEND_URL      skip homepage discovery
@@ -12,9 +12,8 @@ Env overrides:
 
 Email alert (skipped, with a log message, if the MAIL_* values are missing):
   MAIL_USERNAME, MAIL_PASSWORD, MAIL_TO   Gmail address + app password, recipient(s)
-                                          (MAIL_TO may be comma-separated)
   MAIL_HOST (smtp.gmail.com), MAIL_PORT (465)
-  FORCE_NOTIFY=1               send the email even if this weekend post was already announced
+  FORCE_NOTIFY=1               send the email even if this post was already announced
   SITE_URL                     public page URL; defaults to https://<owner>.github.io/<repo>/
 """
 import html
@@ -50,11 +49,10 @@ if SITE_URL and not SITE_URL.endswith("/"):
     SITE_URL += "/"
 STATE_URL = SITE_URL + "state.json" if SITE_URL else ""
 
-MONDAY_RE = re.compile(os.getenv("MONDAY_RE", r"flyer"), re.I)
+MONDAY_RE = re.compile(os.getenv("MONDAY_RE", r"flyer|sales|posts"), re.I)
 WEEKEND_RE = re.compile(os.getenv("WEEKEND_RE", r"weekend"), re.I)
 
 FUZZY_THRESHOLD = 0.92
-STRIP_SIZE_SUFFIX = False
 
 CHALLENGE_MARKERS = ("just a moment", "cf-browser-verification", "challenge-platform",
                      "attention required", "enable javascript and cookies")
@@ -89,7 +87,7 @@ def fetch(scraper, url: str, retries: int = 4) -> str:
 
 SKIP_PATH_PREFIXES = ("/category/", "/tag/", "/page/", "/author/", "/wp-", "/feed",
                      "/comments", "/search", "/about", "/contact", "/privacy",
-                     "/register", "/terms", "/faq", "/disclaimer")
+                     "-review/", "/register", "/terms", "/faq", "/disclaimer")
 
 def is_post_link(href: str) -> bool:
     u = urlparse(href)
@@ -101,10 +99,20 @@ def is_post_link(href: str) -> bool:
         return False
     return not re.search(r"\.(jpe?g|png|gif|webp|pdf|xml)$", path, re.I)
 
+def extract_date_from_url(url: str):
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", url)
+    if m:
+        try:
+            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            pass
+    return None
+
 def discover_posts(home_html: str):
     soup = BeautifulSoup(home_html, "html.parser")
-    seen, candidates = set(), []
-    monday = weekend = None
+    seen = set()
+    mondays = []  # list of tuples: (date, url)
+    weekends = [] # list of tuples: (date, url)
 
     for a in soup.find_all("a", href=True):
         href = urljoin(BASE_URL, a["href"]).split("#")[0]
@@ -113,19 +121,33 @@ def discover_posts(home_html: str):
         seen.add(href)
         blob = " ".join([a.get_text(" ", strip=True), a.get("title", ""),
                          a.get("aria-label", ""), urlparse(href).path.replace("-", " ")])
-        candidates.append((href, blob[:90]))
-        if weekend is None and WEEKEND_RE.search(blob):
-            weekend = href
-        elif monday is None and MONDAY_RE.search(blob) and not WEEKEND_RE.search(blob):
-            monday = href
+        
+        post_date = extract_date_from_url(href)
+        if not post_date:
+            continue
 
-    monday = os.getenv("MONDAY_URL") or monday
-    weekend = os.getenv("WEEKEND_URL") or weekend
-    return monday, weekend
+        if WEEKEND_RE.search(blob):
+            weekends.append((post_date, href))
+        elif MONDAY_RE.search(blob) and not WEEKEND_RE.search(blob) and "seasonal" not in blob.lower() and "electronics" not in blob.lower():
+            mondays.append((post_date, href))
 
-def end_day(url: str):
-    m = re.search(r"(\d{1,2})-(\d{1,2})-20\d\d", url)
-    return m.group(2) if m else None
+    # Sort descending by date
+    mondays.sort(key=lambda x: x[0], reverse=True)
+    weekends.sort(key=lambda x: x[0], reverse=True)
+
+    monday_url = os.getenv("MONDAY_URL") or (mondays[0][1] if mondays else None)
+    weekend_url = os.getenv("WEEKEND_URL") or (weekends[0][1] if weekends else None)
+    
+    monday_date = mondays[0][0] if mondays else None
+    weekend_date = weekends[0][0] if weekends else None
+
+    # If the latest weekend post is older than the latest Monday/Tuesday flyer post,
+    # it belongs to a previous week's cycle, so we suppress weekend mode until the new one drops.
+    if monday_date and weekend_date and weekend_date < monday_date:
+        print(f"[discover] Latest weekend post ({weekend_date.strftime('%Y-%m-%d')}) is older than or from the previous cycle relative to flyer ({monday_date.strftime('%Y-%m-%d')}); falling back to Monday flyer mode.")
+        weekend_url = None
+
+    return monday_url, weekend_url
 
 IMG_URL_RE = re.compile(
     r"^(https?:)?//\S+?\.(jpe?g|png|webp|gif|avif)(\?\S*)?$|^/\S+?\.(jpe?g|png|webp|gif|avif)(\?\S*)?$",
@@ -419,20 +441,22 @@ def send_email(subject: str, body: str) -> bool:
         print(f"[email] failed: {exc!r}", file=sys.stderr)
     return False
 
-def maybe_notify(prev_state, state_ok, weekend_url, monday_url, weekend_items, exclusive):
+def maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, items_count, exclusive_count):
     force = os.getenv("FORCE_NOTIFY") == "1"
-    is_new_post = weekend_url != prev_state.get("weekend_url")
+    key = "weekend_url" if is_weekend_mode else "flyer_url"
+    is_new_post = target_url != prev_state.get(key)
     if not (force or (is_new_post and state_ok)):
         print("[email] not sending notification")
         return
 
+    mode_name = "Weekend Exclusives" if is_weekend_mode else "Monday/Flyer Sales"
     lines = [
-        f"CocoWest weekend deals updated: {len(weekend_items)} items in the weekend post, "
-        f"{len(exclusive)} of them not in the flyer.",
+        f"CocoWest {mode_name} updated: {items_count} items found.",
         f"Browse them: {SITE_URL or '(site URL unknown)'}",
-        f"Weekend post: {weekend_url}"
+        f"Post URL: {target_url}"
     ]
-    send_email(f"CocoWest: {len(exclusive)} new weekend deals", "\n".join(lines))
+    subj = f"CocoWest: {exclusive_count} new weekend deals" if is_weekend_mode else f"CocoWest: Monday Sales Post ({items_count} items)"
+    send_email(subj, "\n".join(lines))
 
 
 # ------------------------------------------------------------------- output
@@ -443,7 +467,7 @@ PAGE_TEMPLATE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#1b8a3a">
-<title>CocoWest Weekend Deals (__TOTAL__ items)</title>
+<title>__PAGE_TITLE__ (__TOTAL__ items)</title>
 <style>
   :root {
     --bg:#f4f5f7; --fg:#1a1a1a; --card:#ffffff; --muted:#666; --line:#e2e2e2;
@@ -542,7 +566,7 @@ PAGE_TEMPLATE = """<!doctype html>
 <div class="sticky-header">
   <header class="bar">
     <div class="bar-row">
-      <div class="title">&#128717;&#65039; Costco Weekend Deals</div>
+      <div class="title">&#128717;&#65039; __PAGE_TITLE__</div>
       <button class="badge-btn" id="list-toggle" type="button">&#128722; List (0)</button>
     </div>
     <div class="search">
@@ -551,7 +575,7 @@ PAGE_TEMPLATE = """<!doctype html>
     </div>
   </header>
   <div class="toolbar">
-    <button class="chip" id="new-toggle" type="button" aria-pressed="false">&#10024; New only (__NEW_COUNT__)</button>
+    __NEW_BTN__
     <button class="chip" id="clr-toggle" type="button" aria-pressed="false">&#127991;&#65039; Clearance (__CLR_COUNT__)</button>
     <button class="chip" id="week-toggle" type="button" aria-pressed="false">&#9200; Ends this week (0)</button>
     <button class="chip danger" id="clear-list" type="button" hidden>Clear list</button>
@@ -566,9 +590,9 @@ PAGE_TEMPLATE = """<!doctype html>
 </div>
 <div class="meta">
   📍 Store Location: <b>__LOCATION__</b><br>
-  Showing <b id="shown-count">__TOTAL__</b> of <b>__TOTAL__</b> weekend items (<b>__NEW_COUNT__</b> new exclusives highlighted) &middot; updated __STAMP__<br>
+  Showing <b id="shown-count">__TOTAL__</b> of <b>__TOTAL__</b> items __META_EXTRA__ &middot; updated __STAMP__<br>
   🏷️ Clearance price = ends in .97 &middot; end-date badges are measured from today (Costco weeks run Mon&ndash;Sun)<br>
-  Sources: <a href="__FLYER_URL__">Monday Flyer</a> &middot; <a href="__WEEKEND_URL__">Weekend Update</a>
+  Source: <a href="__SOURCE_URL__">__SOURCE_NAME__</a>
 </div>
 <main class="grid c2" id="grid">
 __CARDS__
@@ -641,7 +665,9 @@ __CARDS__
     cards.forEach(function (el) { if (fn(el)) n++; });
     return n;
   }
-  newBtn.innerHTML = '&#10024; New only (' + countWhere(function (el) { return el.classList.contains('is-new'); }) + ')';
+  if (newBtn) {
+    newBtn.innerHTML = '&#10024; New only (' + countWhere(function (el) { return el.classList.contains('is-new'); }) + ')';
+  }
   clrBtn.innerHTML = '&#127991;&#65039; Clearance (' + countWhere(function (el) { return el.classList.contains('is-clr'); }) + ')';
   weekBtn.innerHTML = '&#9200; Ends this week (' + countWhere(function (el) { return el.getAttribute('data-week') === '1'; }) + ')';
 
@@ -667,10 +693,16 @@ __CARDS__
     var n = listCountOnPage();
     listBtn.innerHTML = state.listOnly ? 'Show all items' : '&#128722; List (' + n + ')';
     listBtn.classList.toggle('active', state.listOnly);
-    [[newBtn, state.newOnly], [clrBtn, state.clrOnly], [weekBtn, state.weekOnly]].forEach(function (pair) {
-      pair[0].classList.toggle('active', pair[1]);
-      pair[0].setAttribute('aria-pressed', pair[1] ? 'true' : 'false');
+    
+    var toggles = [clrBtn, weekBtn];
+    if (newBtn) toggles.push(newBtn);
+    toggles.forEach(function (btn) {
+      if (!btn) return;
+      var active = (btn === newBtn && state.newOnly) || (btn === clrBtn && state.clrOnly) || (btn === weekBtn && state.weekOnly);
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
     });
+
     clearBtn.hidden = n === 0;
     clearBtn.textContent = 'Clear list (' + n + ')';
     shownEl.textContent = shown;
@@ -698,7 +730,9 @@ __CARDS__
   });
 
   listBtn.addEventListener('click', function () { state.listOnly = !state.listOnly; render(); });
-  newBtn.addEventListener('click', function () { state.newOnly = !state.newOnly; render(); });
+  if (newBtn) {
+    newBtn.addEventListener('click', function () { state.newOnly = !state.newOnly; render(); });
+  }
   clrBtn.addEventListener('click', function () { state.clrOnly = !state.clrOnly; render(); });
   weekBtn.addEventListener('click', function () { state.weekOnly = !state.weekOnly; render(); });
   q.addEventListener('input', render);
@@ -745,14 +779,29 @@ __CARDS__
 </body>
 </html>"""
 
-def render_html(weekend_items, exclusive_urls, monday_url, weekend_url, store_location) -> str:
+def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode, exclusive_urls=None) -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     esc = html.escape
+    exclusive_urls = exclusive_urls or set()
+    
+    clr_count = sum(1 for i in items if is_clearance(i.label))
     new_count = len(exclusive_urls)
-    clr_count = sum(1 for i in weekend_items if is_clearance(i.label))
+
+    if is_weekend_mode:
+        page_title = "Costco Weekend Deals"
+        new_btn_html = f'<button class="chip" id="new-toggle" type="button" aria-pressed="false">&#10024; New only ({new_count})</button>'
+        meta_extra = f'({new_count} new exclusives highlighted)'
+        source_url = weekend_url
+        source_name = "Weekend Update"
+    else:
+        page_title = "Costco Monday Sales Post"
+        new_btn_html = ''
+        meta_extra = ''
+        source_url = monday_url
+        source_name = "Monday Sales Post"
 
     cards = []
-    for i in weekend_items:
+    for i in items:
         is_new = i.url in exclusive_urls
         clearance = is_clearance(i.label)
         end = parse_end_date(i.label)
@@ -785,16 +834,18 @@ def render_html(weekend_items, exclusive_urls, monday_url, weekend_url, store_lo
   </div>
 </figure>''')
 
-    cards_html = "\n".join(cards) or '<p class="empty">No weekend items found.</p>'
+    cards_html = "\n".join(cards) or '<p class="empty">No items found.</p>'
 
     return (PAGE_TEMPLATE
-            .replace("__TOTAL__", str(len(weekend_items)))
-            .replace("__NEW_COUNT__", str(new_count))
+            .replace("__PAGE_TITLE__", page_title)
+            .replace("__TOTAL__", str(len(items)))
             .replace("__CLR_COUNT__", str(clr_count))
+            .replace("__NEW_BTN__", new_btn_html)
             .replace("__LOCATION__", esc(store_location or "Metro Vancouver Area"))
+            .replace("__META_EXTRA__", meta_extra)
             .replace("__STAMP__", stamp)
-            .replace("__FLYER_URL__", esc(monday_url, quote=True))
-            .replace("__WEEKEND_URL__", esc(weekend_url, quote=True))
+            .replace("__SOURCE_URL__", esc(source_url, quote=True))
+            .replace("__SOURCE_NAME__", source_name)
             .replace("__CARDS__", cards_html))
 
 def main() -> int:
@@ -802,52 +853,66 @@ def main() -> int:
     scraper = make_scraper()
 
     monday_url, weekend_url = os.getenv("MONDAY_URL"), os.getenv("WEEKEND_URL")
-    if not (monday_url and weekend_url):
+    if not monday_url:
         home = fetch(scraper, BASE_URL)
         monday_url, weekend_url = discover_posts(home)
-    if not (monday_url and weekend_url):
-        print("ERROR: could not find both posts.", file=sys.stderr)
-        return 1
-    print(f"Flyer  : {monday_url}\nWeekend: {weekend_url}")
 
+    if not monday_url:
+        print("ERROR: could not find Monday/Sales post.", file=sys.stderr)
+        return 1
+
+    print(f"Base Flyer/Sales Post: {monday_url}")
     monday_html = fetch(scraper, monday_url)
-    time.sleep(random.uniform(1, 3))
-    weekend_html = fetch(scraper, weekend_url)
-
     monday_items = extract_items(monday_html, monday_url)
-    weekend_items = extract_items(weekend_html, weekend_url)
 
-    if not monday_items or not weekend_items:
-        print("ERROR: zero images extracted; refusing to deploy.", file=sys.stderr)
+    if not monday_items:
+        print("ERROR: zero images extracted from base sales post; refusing to deploy.", file=sys.stderr)
         return 1
 
-    store_location = extract_location(weekend_html) or extract_location(monday_html)
+    store_location = extract_location(monday_html)
 
-    exclusive = find_exclusive_userscript(weekend_items, monday_items) if MATCH_MODE == "userscript" else find_exclusive(weekend_items, monday_items)
-    exclusive_urls = {i.url for i in exclusive}
+    # Determine mode: Weekend mode if weekend_url exists and was successfully discovered
+    is_weekend_mode = bool(weekend_url)
+    weekend_items = []
+    exclusive = []
+    exclusive_urls = set()
 
+    if is_weekend_mode:
+        print(f"Weekend Update: {weekend_url}")
+        time.sleep(random.uniform(1, 3))
+        weekend_html = fetch(scraper, weekend_url)
+        weekend_items = extract_items(weekend_html, weekend_url)
+        
+        if weekend_items:
+            store_location = extract_location(weekend_html) or store_location
+            exclusive = find_exclusive_userscript(weekend_items, monday_items) if MATCH_MODE == "userscript" else find_exclusive(weekend_items, monday_items)
+            exclusive_urls = {i.url for i in exclusive}
+        else:
+            is_weekend_mode = False
+
+    target_items = weekend_items if is_weekend_mode else monday_items
+    target_url = weekend_url if is_weekend_mode else monday_url
+
+    print(f"Mode: {'Weekend Exclusives' if is_weekend_mode else 'Monday Sales Post'}")
     print(f"Location: {store_location}")
-    print(f"Total weekend items: {len(weekend_items)} | New exclusives highlighted: {len(exclusive_urls)}")
-    n_priced = sum(1 for i in weekend_items if parse_price(i.label))
-    n_clr = sum(1 for i in weekend_items if is_clearance(i.label))
-    n_dated = sum(1 for i in weekend_items if parse_end_date(i.label))
-    print(f"Prices found: {n_priced}/{len(weekend_items)} | .97 clearance: {n_clr} | "
-          f"end dates found: {n_dated}/{len(weekend_items)}")
+    print(f"Total items: {len(target_items)} | New exclusives: {len(exclusive_urls)}")
 
     prev_state, state_ok = load_previous_state(scraper)
 
     (OUTPUT_DIR / "index.html").write_text(
-        render_html(weekend_items, exclusive_urls, monday_url, weekend_url, store_location),
+        render_html(target_items, monday_url, weekend_url or monday_url, store_location, is_weekend_mode, exclusive_urls),
         encoding="utf-8")
+    
     (OUTPUT_DIR / "state.json").write_text(json.dumps({
         "weekend_url": weekend_url,
         "flyer_url": monday_url,
-        "total_count": len(weekend_items),
+        "mode": "weekend" if is_weekend_mode else "flyer",
+        "total_count": len(target_items),
         "exclusive_count": len(exclusive),
         "updated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }, indent=2), encoding="utf-8")
 
-    maybe_notify(prev_state, state_ok, weekend_url, monday_url, weekend_items, exclusive)
+    maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, len(target_items), len(exclusive))
     return 0
 
 if __name__ == "__main__":
