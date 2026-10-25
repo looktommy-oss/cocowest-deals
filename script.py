@@ -624,7 +624,7 @@ __CARDS__
       var n = listCountOnPage();
       listBtn.innerHTML = state.listOnly ? 'Show all items' : '&#128722; List (' + n + ')';
       listBtn.classList.toggle('active', state.listOnly);
-      sourceBtn.textContent = state.viewingMonday ? '&#128197; Showing: Monday Flyer' : '&#128197; Showing: Weekend Update';
+      sourceBtn.textContent = state.viewingMonday ? 'Showing: Monday Flyer' : 'Showing: Weekend Update';
       newBtn.style.opacity = state.viewingMonday ? '0.4' : '1';
       newBtn.disabled = state.viewingMonday;
       
