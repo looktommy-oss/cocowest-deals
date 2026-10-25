@@ -459,13 +459,15 @@ PAGE_TEMPLATE = """<!doctype html>
   .chip.active { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
   .chip.danger { color:var(--danger); border-color:var(--danger); }
   .chip.info { background:#007bff; color:#fff; border-color:#007bff; }
-  .cols-toggle { display:none; align-items:center; gap:.35rem; margin-left:auto; font-size:.8rem; color:var(--muted); }
+  .cols-toggle { display:flex; align-items:center; gap:.35rem; margin-left:auto; font-size:.8rem; color:var(--muted); }
   .seg { display:inline-flex; border:1px solid var(--line); border-radius:999px; overflow:hidden; }
   .seg button { border:none; background:var(--card); color:var(--fg); padding:.3rem .7rem; font-size:.85rem; font-weight:700; cursor:pointer; }
   .seg button.active { background:var(--accent); color:var(--on-accent); }
   .meta { max-width:1200px; margin:.6rem auto .2rem; padding:0 .8rem; color:var(--muted); font-size:.8rem; line-height:1.5; }
   .meta a { color:inherit; }
   .grid { max-width:1200px; margin:.6rem auto; padding:0 .8rem; display:grid; gap:.8rem; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); }
+  .grid.c1 { grid-template-columns:1fr; }
+  .grid.c2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .card { margin:0; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; position:relative; display:flex; flex-direction:column; justify-content:space-between; }
   .card.is-new { border:2px solid var(--highlight-border); background:var(--highlight); }
   .card.is-expired img, .card.is-expired figcaption { opacity:.5; }
@@ -485,10 +487,8 @@ PAGE_TEMPLATE = """<!doctype html>
   .end-badge.expired { background:var(--line); color:var(--muted); text-decoration:line-through; }
   .empty { padding:2rem 1rem; text-align:center; color:var(--muted); grid-column:1/-1; }
   @media (max-width:640px) {
-    .cols-toggle { display:flex; }
     .toolbar { padding:0 .6rem; }
-    .grid { padding:0 .5rem; gap:.5rem; grid-template-columns:minmax(0,1fr); }
-    .grid.c2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .grid { padding:0 .5rem; gap:.5rem; }
   }
 </style>
 </head>
@@ -576,7 +576,7 @@ __CARDS__
     var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
     var checks = Array.prototype.slice.call(document.querySelectorAll('.shop-check'));
 
-    var shoppingList = load(LIST_KEY, []);
+    var shoppingList = load(LIST_KEY, []).map(Number);
     if (!Array.isArray(shoppingList)) shoppingList = [];
     var state = { listOnly: false, newOnly: false, clrOnly: false, weekOnly: false, viewingMonday: false };
 
@@ -594,15 +594,21 @@ __CARDS__
       if (r.inWeek) el.setAttribute('data-week', '1');
     });
 
-    function inList(url) { return shoppingList.indexOf(url) !== -1; }
+    function inList(idx) { return shoppingList.indexOf(Number(idx)) !== -1; }
     function listCountOnPage() {
-      return cards.filter(function (el) { return inList(el.getAttribute('data-url')); }).length;
+      return cards.filter(function (el) {
+        var idx = Number(el.getAttribute('data-index'));
+        var isMonday = el.classList.contains('is-monday');
+        var matchesSource = state.viewingMonday ? isMonday : !isMonday;
+        return matchesSource && inList(idx);
+      }).length;
     }
 
     function render() {
       var t = q.value.trim().toLowerCase();
       var shown = 0;
       cards.forEach(function (el) {
+        var idx = Number(el.getAttribute('data-index'));
         var isMonday = el.classList.contains('is-monday');
         var matchesSource = state.viewingMonday ? isMonday : !isMonday;
         var ok = matchesSource &&
@@ -610,7 +616,7 @@ __CARDS__
                  (!state.newOnly || el.classList.contains('is-new')) &&
                  (!state.clrOnly || el.classList.contains('is-clr')) &&
                  (!state.weekOnly || el.getAttribute('data-week') === '1') &&
-                 (!state.listOnly || inList(el.getAttribute('data-url')));
+                 (!state.listOnly || inList(idx));
         el.hidden = !ok;
         if (ok) shown++;
       });
@@ -637,13 +643,13 @@ __CARDS__
     }
 
     checks.forEach(function (chk) {
-      var url = chk.getAttribute('data-url');
-      chk.checked = inList(url);
+      var idx = Number(chk.getAttribute('data-index'));
+      chk.checked = inList(idx);
       chk.addEventListener('change', function () {
         if (chk.checked) {
-          if (!inList(url)) shoppingList.push(url);
+          if (!inList(idx)) shoppingList.push(idx);
         } else {
-          shoppingList = shoppingList.filter(function (u) { return u !== url; });
+          shoppingList = shoppingList.filter(function (i) { return i !== idx; });
         }
         save(LIST_KEY, shoppingList);
         render();
@@ -668,8 +674,8 @@ __CARDS__
       }
       var itemsText = [];
       cards.forEach(function (el) {
-        var url = el.getAttribute('data-url');
-        if (inList(url)) {
+        var idx = Number(el.getAttribute('data-index'));
+        if (inList(idx)) {
           var label = el.querySelector('figcaption').textContent.trim();
           itemsText.push('- ' + label);
         }
@@ -695,10 +701,17 @@ __CARDS__
       var n = listCountOnPage();
       if (!n) return;
       if (!window.confirm('Remove all ' + n + ' items from your shopping list?')) return;
-      shoppingList = [];
+      shoppingList = shoppingList.filter(function (idx) {
+        var el = document.querySelector('[data-index="' + idx + '"]');
+        var isMonday = el && el.classList.contains('is-monday');
+        var matchesSource = state.viewingMonday ? isMonday : !isMonday;
+        return !matchesSource; // keep items not currently viewed
+      });
       save(LIST_KEY, shoppingList);
-      checks.forEach(function (chk) { chk.checked = false; });
-      state.listOnly = false;
+      checks.forEach(function (chk) {
+        var idx = Number(chk.getAttribute('data-index'));
+        chk.checked = inList(idx);
+      });
       render();
     });
 
@@ -735,6 +748,7 @@ def render_html(weekend_items, monday_items, exclusive_urls, monday_url, weekend
     clr_count = sum(1 for i in all_items_for_clr if is_clearance(i.label))
 
     cards = []
+    idx = 0
     # Render Weekend Items
     for i in weekend_items:
         is_new = i.url in exclusive_urls
@@ -747,7 +761,7 @@ def render_html(weekend_items, monday_items, exclusive_urls, monday_url, weekend
         if clearance:
             classes.append("is-clr")
 
-        attrs = f'data-t="{esc(i.label.lower(), quote=True)}" data-url="{esc(i.url, quote=True)}"'
+        attrs = f'data-index="{idx}" data-t="{esc(i.label.lower(), quote=True)}" data-url="{esc(i.url, quote=True)}"'
         if end:
             attrs += f' data-end="{end}"'
 
@@ -763,11 +777,12 @@ def render_html(weekend_items, monday_items, exclusive_urls, monday_url, weekend
   <figcaption>{esc(i.label)}</figcaption>
   <div class="card-footer">
     <label class="shop-label">
-      <input type="checkbox" class="shop-check" data-url="{esc(i.url, quote=True)}"> Add to list
+      <input type="checkbox" class="shop-check" data-index="{idx}"> Add to list
     </label>
     {end_badge}
   </div>
 </figure>''')
+        idx += 1
 
     # Render Monday Items
     for i in monday_items:
@@ -778,7 +793,7 @@ def render_html(weekend_items, monday_items, exclusive_urls, monday_url, weekend
         if clearance:
             classes.append("is-clr")
 
-        attrs = f'data-t="{esc(i.label.lower(), quote=True)}" data-url="{esc(i.url, quote=True)}"'
+        attrs = f'data-index="{idx}" data-t="{esc(i.label.lower(), quote=True)}" data-url="{esc(i.url, quote=True)}"'
         if end:
             attrs += f' data-end="{end}"'
 
@@ -793,11 +808,12 @@ def render_html(weekend_items, monday_items, exclusive_urls, monday_url, weekend
   <figcaption>{esc(i.label)}</figcaption>
   <div class="card-footer">
     <label class="shop-label">
-      <input type="checkbox" class="shop-check" data-url="{esc(i.url, quote=True)}"> Add to list
+      <input type="checkbox" class="shop-check" data-index="{idx}"> Add to list
     </label>
     {end_badge}
   </div>
 </figure>''')
+        idx += 1
 
     cards_html = "\n".join(cards) or '<p class="empty">No items found.</p>'
 
