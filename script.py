@@ -2,7 +2,7 @@
 """
 Scrape CocoWest.ca for the weekly Costco flyer post vs the Weekend Update post,
 display ALL weekend items with exclusive ones highlighted, include an interactive
-shopping list, store location parsed, flag .97 clearance prices and end dates, 
+shopping list, store location parsed, flag Clearance prices and end dates, 
 and email you when a NEW weekend post shows up.
 
 Env overrides:
@@ -239,9 +239,7 @@ def find_item_no(alt: str, url: str) -> str:
     return m.group(1) if m else ""
 
 def reject_reason(img, url: str, container):
-    """Return None if the image should be kept, else a short reason string."""
     u = urlparse(url)
-
     fig = img.find_parent("figure")
     cap = fig.find("figcaption") if fig else None
     cap_text = cap.get_text(" ", strip=True) if cap else ""
@@ -492,7 +490,7 @@ PAGE_TEMPLATE = """<!doctype html>
   .new-tag { position:absolute; top:8px; left:8px; background:#28a745; color:#fff; font-size:.7rem; font-weight:bold; padding:2px 6px;
              border-radius:4px; z-index:2; text-transform:uppercase; }
   .clr-tag { position:absolute; top:8px; right:8px; background:#6f42c1; color:#fff; font-size:.7rem; font-weight:bold; padding:2px 6px;
-             border-radius:4px; z-index:2; }
+             border-radius:4px; z-index:2; text-transform:uppercase; }
   .card a { display:block; }
   .card img { width:100%; aspect-ratio:1/1; object-fit:contain; display:block; background:#fff; }
   .card figcaption { padding:.5rem .6rem; font-size:.85rem; line-height:1.3; flex-grow:1; overflow-wrap:anywhere; }
@@ -752,7 +750,7 @@ def render_html(weekend_items, exclusive_urls, monday_url, weekend_url, store_lo
             attrs += f' data-end="{end}"'
 
         new_tag = '<div class="new-tag">&#10024; New</div>' if is_new else ''
-        clr_tag = '<div class="clr-tag">&#127991;&#65039; .97</div>' if clearance else ''
+        clr_tag = '<div class="clr-tag">&#127991;&#65039; Clearance</div>' if clearance else ''
         end_badge = '<span class="end-badge" hidden></span>' if end else ''
 
         cards.append(f'''<figure class="{' '.join(classes)}" {attrs}>
