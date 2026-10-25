@@ -6,105 +6,120 @@ from bs4 import BeautifulSoup
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-def clean_filename(url_str):
-    """Extracts a clean base name from image URLs to handle CDN query strings and dimensions."""
-    if not url_str:
-        return ""
-    # Strip URL parameters
-    base = url_str.split('?')[0].split('/')[-1].lower()
-    # Remove standard image dimensions added by WordPress (e.g. -500x375)
-    base = re.sub(r'-\d+x\d+\.', '.', base)
-    return base
-
-def get_post_images(url):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+def get_post_items(url):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5'
+    }
     try:
         resp = requests.get(url, headers=headers, timeout=15)
         if resp.status_code != 200:
-            print(f"Failed to fetch {url}, status code: {resp.status_code}")
+            print(f"Failed to fetch {url}, status: {resp.status_code}")
             return []
         
         soup = BeautifulSoup(resp.text, 'html.parser')
         content = soup.find('div', class_=re.compile(r'entry-content|post-content')) or soup.find('article') or soup
         
         items = []
-        for img in content.find_all('img'):
-            # Grab image source from any possible lazy-load attribute
-            src = img.get('src') or img.get('data-src') or img.get('data-lazy-src') or ''
+        images = content.find_all('img')
+        
+        for img in images:
+            alt = (img.get('alt') or '').strip()
             
-            # If src is blank or a base64 placeholder, check srcset
-            if not src or 'data:image' in src:
-                srcset = img.get('srcset') or img.get('data-srcset') or ''
-                if srcset:
-                    src = srcset.split(',')[0].split(' ')[0]
+            # Check every possible lazy-loading image attribute
+            src = (
+                img.get('src') or 
+                img.get('data-src') or 
+                img.get('data-lazy-src') or 
+                img.get('data-orig-file') or ''
+            )
+            
+            if not src and img.get('srcset'):
+                src = img.get('srcset').split(',')[0].split(' ')[0]
+            if not src and img.get('data-srcset'):
+                src = img.get('data-srcset').split(',')[0].split(' ')[0]
 
-            if ('uploads' in src or 'wp-content' in src) and not src.endswith('.svg'):
-                filename = clean_filename(src)
+            if src and ('uploads' in src or 'wp-content' in src):
+                filename = src.split('/')[-1].split('?')[0]
+                identifier = alt if alt else filename
                 
-                # Exclude UI elements, banners, logos, and badges
-                if not any(k in filename for k in ['logo', 'avatar', 'header', 'banner', 'gravatar', 'icon', 'button', 'badge', 'social', 'cocowest']):
+                if identifier and not any(k in identifier.lower() for k in ['logo', 'avatar', 'gravatar', 'header', 'banner', 'icon', 'badge']):
                     items.append({
-                        'filename': filename,
+                        'id': identifier,
                         'src': src,
-                        'alt': img.get('alt', 'Deal Image')
+                        'alt': alt or 'Costco Deal'
                     })
+
+        # Regex fallback if BeautifulSoup missed lazy-loaded images
+        if not items:
+            raw_urls = re.findall(r'https?://[^\s"\']+\.(?:jpg|jpeg|png|webp)', resp.text)
+            for raw in raw_urls:
+                if 'uploads' in raw or 'wp-content' in raw:
+                    fname = raw.split('/')[-1].split('?')[0]
+                    if not any(k in fname.lower() for k in ['logo', 'avatar', 'gravatar', 'header', 'banner', 'icon', 'badge']):
+                        items.append({'id': fname, 'src': raw, 'alt': 'Costco Deal'})
+
         return items
     except Exception as e:
         print(f"Error fetching {url}: {e}")
         return []
 
 def main():
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    
-    # 1. Fetch homepage to identify current post URLs dynamically
-    home_url = 'https://cocowest.ca/'
-    resp = requests.get(home_url, headers=headers, timeout=15)
-    soup = BeautifulSoup(resp.text, 'html.parser')
+    print("Fetching CocoWest homepage to locate posts...")
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    }
     
     monday_url = None
     weekend_url = None
-
-    for a in soup.find_all('a', href=True):
-        href = a['href']
-        href_lower = href.lower()
-
-        if 'weekend-update' in href_lower or ('weekend' in href_lower and 'costco-sale' in href_lower):
-            if not weekend_url:
-                weekend_url = href
-        elif ('costco-flyer' in href_lower or 'monday' in href_lower or 'sale-items' in href_lower) and 'weekend' not in href_lower:
-            if not monday_url:
-                monday_url = href
+    
+    try:
+        home_resp = requests.get('https://cocowest.ca/', headers=headers, timeout=15)
+        home_soup = BeautifulSoup(home_resp.text, 'html.parser')
+        
+        for a in home_soup.find_all('a', href=True):
+            text = (a.get_text() or '').lower()
+            href = (a['href'] or '').lower()
+            
+            if ('sale items for' in text or 'monday' in text or 'sale-items-for' in href or 'costco-flyer' in href) \
+               and 'weekend' not in text and 'weekend' not in href and 'fan-blog' not in text:
+                if not monday_url:
+                    monday_url = a['href']
+            elif 'weekend' in text or 'weekend' in href:
+                if not weekend_url:
+                    weekend_url = a['href']
+    except Exception as e:
+        print(f"Homepage fetch failed: {e}")
 
     # Fallbacks for current active post URLs
-    if not weekend_url:
-        weekend_url = "https://cocowest.ca/2026/10/weekend-update-costco-sale-items-for-october-23-25-2026-for-bc-ab-mb-sk/"
     if not monday_url:
         monday_url = "https://cocowest.ca/2026/10/costco-flyer-costco-sale-items-for-october-19-25-2026-2026-for-bc-ab-sk-mb/"
+    if not weekend_url:
+        weekend_url = "https://cocowest.ca/2026/10/weekend-update-costco-sale-items-for-october-23-25-2026-for-bc-ab-mb-sk/"
 
     print(f"Target Monday Post:  {monday_url}")
     print(f"Target Weekend Post: {weekend_url}")
 
-    monday_items = get_post_images(monday_url)
-    weekend_items = get_post_images(weekend_url)
+    monday_data = get_post_items(monday_url)
+    weekend_data = get_post_items(weekend_url)
 
-    monday_filenames = {item['filename'] for item in monday_items if item['filename']}
-    
-    print(f"Extracted {len(monday_items)} images from Monday post.")
-    print(f"Extracted {len(weekend_items)} images from Weekend post.")
+    print(f"Extracted {len(monday_data)} images from Monday post.")
+    print(f"Extracted {len(weekend_data)} images from Weekend post.")
 
-    # Identify items present on weekend but NOT on Monday
+    monday_ids = {item['id'] for item in monday_data}
+
+    # Filter out items present on Monday
     new_deals = []
-    seen_files = set()
-    
-    for item in weekend_items:
-        fname = item['filename']
-        if fname and fname not in monday_filenames and fname not in seen_files:
+    seen = set()
+    for item in weekend_data:
+        if item['id'] not in monday_ids and item['id'] not in seen:
             new_deals.append(item)
-            seen_files.add(fname)
+            seen.add(item['id'])
 
     print(f"Found {len(new_deals)} exclusive new weekend deals!")
 
-    # Build HTML Output
+    # Build HTML Page
     html_page = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -143,7 +158,7 @@ def main():
 
     print("Successfully created index.html!")
 
-    # Email Digest
+    # Optional Email Digest
     sender_email = os.environ.get("MAIL_USERNAME")
     receiver_email = os.environ.get("MAIL_TO")
     app_password = os.environ.get("MAIL_PASSWORD")
