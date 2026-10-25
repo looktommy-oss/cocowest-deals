@@ -507,7 +507,7 @@ PAGE_TEMPLATE = """<!doctype html>
   </div>
 </header>
 <div class="toolbar">
-  <button class="chip info" id="source-toggle" type="button">&#128197; Showing: Weekend Update</button>
+  <button class="chip info" id="source-toggle" type="button">Showing: Weekend Update</button>
   <button class="chip" id="new-toggle" type="button" aria-pressed="false">&#10024; New only (__NEW_COUNT__)</button>
   <button class="chip" id="clr-toggle" type="button" aria-pressed="false">&#127991;&#65039; .97 clearance (__CLR_COUNT__)</button>
   <button class="chip" id="week-toggle" type="button" aria-pressed="false">&#9200; Ends this week (0)</button>
