@@ -1,19 +1,22 @@
 import os
 import re
 import smtplib
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 def get_post_items(url):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5'
-    }
+    # Use cloudscraper to bypass Cloudflare anti-bot protection
+    scraper = cloudscraper.create_scraper(
+        browser={
+            'browser': 'chrome',
+            'platform': 'windows',
+            'desktop': True
+        }
+    )
     try:
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = scraper.get(url, timeout=20)
         if resp.status_code != 200:
             print(f"Failed to fetch {url}, status: {resp.status_code}")
             return []
@@ -27,7 +30,6 @@ def get_post_items(url):
         for img in images:
             alt = (img.get('alt') or '').strip()
             
-            # Check every possible lazy-loading image attribute
             src = (
                 img.get('src') or 
                 img.get('data-src') or 
@@ -51,7 +53,7 @@ def get_post_items(url):
                         'alt': alt or 'Costco Deal'
                     })
 
-        # Regex fallback if BeautifulSoup missed lazy-loaded images
+        # Regex fallback for lazy-loaded image sources
         if not items:
             raw_urls = re.findall(r'https?://[^\s"\']+\.(?:jpg|jpeg|png|webp)', resp.text)
             for raw in raw_urls:
@@ -66,16 +68,14 @@ def get_post_items(url):
         return []
 
 def main():
-    print("Fetching CocoWest homepage to locate posts...")
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-    }
+    print("Fetching CocoWest homepage using cloudscraper...")
+    scraper = cloudscraper.create_scraper()
     
     monday_url = None
     weekend_url = None
     
     try:
-        home_resp = requests.get('https://cocowest.ca/', headers=headers, timeout=15)
+        home_resp = scraper.get('https://cocowest.ca/', timeout=20)
         home_soup = BeautifulSoup(home_resp.text, 'html.parser')
         
         for a in home_soup.find_all('a', href=True):
@@ -117,7 +117,7 @@ def main():
             new_deals.append(item)
             seen.add(item['id'])
 
-    print(f"Found {len(new_deals)} exclusive new weekend deals!")
+    print(f"🎉 Found {len(new_deals)} exclusive new weekend deals!")
 
     # Build HTML Page
     html_page = f"""<!DOCTYPE html>
