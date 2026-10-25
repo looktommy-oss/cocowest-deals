@@ -495,6 +495,9 @@ PAGE_TEMPLATE = """<!doctype html>
   .meta a { color:inherit; }
   
   .grid { max-width:1200px; margin:.6rem auto; padding:0 .8rem; display:grid; gap:.8rem; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); }
+  .grid.c1 { grid-template-columns:minmax(0,1fr); }
+  .grid.c2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+
   .card { margin:0; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; position:relative;
           display:flex; flex-direction:column; justify-content:space-between; }
   .card.is-new { border:2px solid var(--highlight-border); background:var(--highlight); }
@@ -520,7 +523,9 @@ PAGE_TEMPLATE = """<!doctype html>
   @media (max-width:640px) {
     .cols-toggle { display:flex; }
     .toolbar { padding:0 .6rem .5rem; }
-    .grid { padding:0 .5rem; gap:.5rem; grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .grid { padding:0 .5rem; gap:.5rem; }
+    .grid.c1 { grid-template-columns:minmax(0,1fr); }
+    .grid.c2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .grid.c2 .card { border-radius:10px; }
     .grid.c2 .card figcaption { font-size:.72rem; padding:.4rem .45rem; }
     .grid.c2 .card-footer { padding:.35rem .45rem .5rem; font-size:.72rem; }
