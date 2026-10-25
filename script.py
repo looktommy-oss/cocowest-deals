@@ -518,7 +518,6 @@ def main() -> int:
 
 import smtplib
 from email.mime.text import MIMEText
-    
     mail_user = os.getenv("MAIL_USERNAME")
     mail_pass = os.getenv("MAIL_PASSWORD")
     mail_to = os.getenv("MAIL_TO")
