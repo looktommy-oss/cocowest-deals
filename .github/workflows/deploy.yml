@@ -21,19 +21,15 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install cloudscraper beautifulsoup4 lxml
+        run: pip install cloudscraper beautifulsoup4
 
       - name: Run scraper script
-        env:
-          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
-          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
-          MAIL_TO: ${{ secrets.MAIL_TO }}
         run: python script.py
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: .
+          publish_dir: ./public
           publish_branch: gh-pages
           force_orphan: true
