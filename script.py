@@ -2,8 +2,8 @@
 """
 Scrape CocoWest.ca for the weekly Costco flyer post vs the Weekend Update post,
 display ALL weekend items with exclusive ones highlighted, include an interactive
-shopping list, flag .97 clearance prices and end dates, and email you when a NEW
-weekend post shows up.
+shopping list, store location parsed, flag .97 clearance prices and end dates, 
+and email you when a NEW weekend post shows up.
 
 Env overrides:
   MONDAY_URL, WEEKEND_URL      skip homepage discovery
@@ -242,7 +242,6 @@ def reject_reason(img, url: str, container):
     """Return None if the image should be kept, else a short reason string."""
     u = urlparse(url)
 
-    # Gather all text associated with this image to catch promo banners reliably
     fig = img.find_parent("figure")
     cap = fig.find("figcaption") if fig else None
     cap_text = cap.get_text(" ", strip=True) if cap else ""
@@ -254,7 +253,6 @@ def reject_reason(img, url: str, container):
         Path(u.path).name
     ]).lower()
 
-    # Reject non-product promotional site banners
     if "what is on sale next week" in blob or "sales from last year" in blob:
         return "promo_banner"
 
@@ -316,6 +314,17 @@ def extract_items(post_html: str, page_url: str):
     items, _ = extract_from(soup, page_url, Counter())
     return items
 
+def extract_location(post_html: str) -> str:
+    soup = BeautifulSoup(post_html, "html.parser")
+    text = soup.get_text(" ", strip=True)
+    m = re.search(r"Location:\s*([A-Za-z0-9\s\(\),_-]+?)(?=\.\s|Hi\s|Hello\s|$)", text, re.I)
+    if m:
+        return m.group(1).strip()
+    m2 = re.search(r"Location:\s*([^<\n\r]+)", post_html, re.I)
+    if m2:
+        return m2.group(1).strip().split("<")[0]
+    return ""
+
 def find_exclusive(weekend_items, monday_items):
     mon_nos = {i.item_no for i in monday_items if i.item_no}
     mon_files = {i.file_key for i in monday_items if i.file_key}
@@ -345,26 +354,20 @@ def find_exclusive_userscript(weekend_items, monday_items):
 
 # ------------------------------------------------- price + end-date parsing
 
-# Captions look like:
-#   "1896304 KITCHENAID OVEN MITT SET 4 PIECES ($5.00 INSTANT SAVINGS EXPIRES ON 2026-10-25) $19.99"
 PRICE_RE = re.compile(r"\$\s?(\d[\d,]*)\.(\d{2})\b")
 END_RE = re.compile(
     r"(?:EXPIRES|ENDS|VALID\s+(?:UNTIL|THROUGH|THRU))\s+(?:ON\s+)?(\d{4}-\d{2}-\d{2})", re.I)
 
 def parse_price(label: str):
-    """Final shelf price as (dollars, cents) strings, or None.
-    Amounts inside parentheses (the instant-savings amount) are ignored."""
     text = re.sub(r"\([^)]*\)", " ", label or "")
     found = PRICE_RE.findall(text)
     return found[-1] if found else None
 
 def is_clearance(label: str) -> bool:
-    """Prices ending in .97 are treated as clearance."""
     p = parse_price(label)
     return bool(p) and p[1] == "97"
 
 def parse_end_date(label: str) -> str:
-    """'... EXPIRES ON 2026-10-25 ...' -> '2026-10-25' (validated), else ''."""
     m = END_RE.search(label or "")
     if not m:
         return ""
@@ -378,13 +381,8 @@ def parse_end_date(label: str) -> str:
 # --------------------------------------------------------- state + alerting
 
 def load_previous_state(scraper):
-    """Fetch state.json from the already-deployed site.
-    Returns (state_dict, reachable).
-      200 -> (state, True)
-      404 -> ({}, True)    first run, nothing deployed yet
-      anything else / network error -> ({}, False)  (we then skip the email to avoid duplicates)"""
     if not STATE_URL:
-        print("[state] no site URL known (GITHUB_REPOSITORY / SITE_URL unset); skipping state check")
+        print("[state] no site URL known; skipping state check")
         return {}, False
     try:
         r = scraper.get(f"{STATE_URL}?t={int(time.time())}", timeout=30)
@@ -392,7 +390,6 @@ def load_previous_state(scraper):
             return r.json(), True
         if r.status_code == 404:
             return {}, True
-        print(f"[state] unexpected HTTP {r.status_code} for {STATE_URL}", file=sys.stderr)
     except Exception as exc:
         print(f"[state] could not load previous state: {exc!r}", file=sys.stderr)
     return {}, False
@@ -401,11 +398,8 @@ def send_email(subject: str, body: str) -> bool:
     user = os.getenv("MAIL_USERNAME")
     password = os.getenv("MAIL_PASSWORD")
     to = os.getenv("MAIL_TO")
-    missing = [n for n, v in (("MAIL_USERNAME", user), ("MAIL_PASSWORD", password), ("MAIL_TO", to)) if not v]
-    if missing:
-        print(f"[email] skipped: {', '.join(missing)} not set. "
-              "Add them under Settings > Secrets and variables > Actions, and pass them in the "
-              "workflow's 'Run scraper script' step via env:.")
+    if not (user and password and to):
+        print("[email] skipped: MAIL_* secrets not set.")
         return False
 
     recipients = [e.strip() for e in to.split(",") if e.strip()]
@@ -423,10 +417,7 @@ def send_email(subject: str, body: str) -> bool:
             smtp.send_message(msg, to_addrs=recipients)
         print(f"[email] sent to {', '.join(recipients)}")
         return True
-    except smtplib.SMTPAuthenticationError as exc:
-        print(f"[email] login rejected ({exc.smtp_code}). For Gmail, MAIL_PASSWORD must be a 16-character "
-              "App Password (needs 2-Step Verification), not your normal password.", file=sys.stderr)
-    except Exception as exc:  # never fail the whole run because of email
+    except Exception as exc:
         print(f"[email] failed: {exc!r}", file=sys.stderr)
     return False
 
@@ -434,23 +425,15 @@ def maybe_notify(prev_state, state_ok, weekend_url, monday_url, weekend_items, e
     force = os.getenv("FORCE_NOTIFY") == "1"
     is_new_post = weekend_url != prev_state.get("weekend_url")
     if not (force or (is_new_post and state_ok)):
-        reason = "already announced this weekend post" if state_ok else "previous state unreachable"
-        print(f"[email] not sending ({reason}); set FORCE_NOTIFY=1 to send anyway")
+        print("[email] not sending notification")
         return
 
     lines = [
         f"CocoWest weekend deals updated: {len(weekend_items)} items in the weekend post, "
         f"{len(exclusive)} of them not in the flyer.",
-        "",
         f"Browse them: {SITE_URL or '(site URL unknown)'}",
-        f"Weekend post: {weekend_url}",
-        f"Flyer post:   {monday_url}",
-        "",
-        "New items:" if exclusive else "No new exclusives this time.",
+        f"Weekend post: {weekend_url}"
     ]
-    lines += [f"  - {i.label[:90]}" for i in exclusive[:20]]
-    if len(exclusive) > 20:
-        lines.append(f"  ... and {len(exclusive) - 20} more")
     send_email(f"CocoWest: {len(exclusive)} new weekend deals", "\n".join(lines))
 
 
@@ -566,6 +549,7 @@ PAGE_TEMPLATE = """<!doctype html>
   </div>
 </div>
 <div class="meta">
+  📍 Store Location: <b>__LOCATION__</b><br>
   Showing <b id="shown-count">__TOTAL__</b> of <b>__TOTAL__</b> weekend items (<b>__NEW_COUNT__</b> new exclusives highlighted) &middot; updated __STAMP__<br>
   &#127991;&#65039; .97 price = clearance &middot; end-date badges are measured from today (Costco weeks run Mon&ndash;Sun)<br>
   Sources: <a href="__FLYER_URL__">Monday Flyer</a> &middot; <a href="__WEEKEND_URL__">Weekend Update</a>
@@ -591,8 +575,6 @@ __CARDS__
     try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
   }
 
-  // BEGIN classify
-  // "Ends this week" = ends between today and this coming Sunday (Costco weeks run Mon-Sun).
   function classifyEnd(s, today) {
     var p = s.split('-');
     var end = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
@@ -605,7 +587,6 @@ __CARDS__
     if (left === 1) return { cls: 'tomorrow', text: 'Ends tomorrow', inWeek: true, expired: false };
     return { cls: 'week', text: 'Ends ' + DAYS[end.getDay()], inWeek: true, expired: false };
   }
-  // END classify
 
   var q = document.getElementById('q');
   var grid = document.getElementById('grid');
@@ -625,7 +606,6 @@ __CARDS__
   if (!Array.isArray(shoppingList)) shoppingList = [];
   var state = { listOnly: false, newOnly: false, clrOnly: false, weekOnly: false };
 
-  // End-date badges, measured against the viewer's current date
   var now = new Date();
   var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   cards.forEach(function (el) {
@@ -651,7 +631,6 @@ __CARDS__
 
   function inList(url) { return shoppingList.indexOf(url) !== -1; }
 
-  // Only count list entries that are on this page (older weeks' entries stay invisible).
   function listCountOnPage() {
     return countWhere(function (el) { return inList(el.getAttribute('data-url')); });
   }
@@ -688,7 +667,6 @@ __CARDS__
     emptyMsg.hidden = shown !== 0;
   }
 
-  // Shopping list checkboxes
   checks.forEach(function (chk) {
     var url = chk.getAttribute('data-url');
     chk.checked = inList(url);
@@ -709,7 +687,6 @@ __CARDS__
   weekBtn.addEventListener('click', function () { state.weekOnly = !state.weekOnly; render(); });
   q.addEventListener('input', render);
 
-  // Reset = clear search + all filters + list view (does NOT touch your saved list)
   resetBtn.addEventListener('click', function () {
     q.value = '';
     state.newOnly = false;
@@ -719,7 +696,6 @@ __CARDS__
     render();
   });
 
-  // Clear list = untick everything and forget the saved list
   clearBtn.addEventListener('click', function () {
     var n = listCountOnPage();
     if (!n) return;
@@ -731,7 +707,6 @@ __CARDS__
     render();
   });
 
-  // 1 or 2 products per row (phones only; remembered)
   function setCols(n) {
     n = (n === 1) ? 1 : 2;
     grid.classList.remove('c1', 'c2');
@@ -754,7 +729,7 @@ __CARDS__
 </body>
 </html>"""
 
-def render_html(weekend_items, exclusive_urls, monday_url, weekend_url, n_monday) -> str:
+def render_html(weekend_items, exclusive_urls, monday_url, weekend_url, store_location) -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     esc = html.escape
     new_count = len(exclusive_urls)
@@ -800,6 +775,7 @@ def render_html(weekend_items, exclusive_urls, monday_url, weekend_url, n_monday
             .replace("__TOTAL__", str(len(weekend_items)))
             .replace("__NEW_COUNT__", str(new_count))
             .replace("__CLR_COUNT__", str(clr_count))
+            .replace("__LOCATION__", esc(store_location or "Metro Vancouver Area"))
             .replace("__STAMP__", stamp)
             .replace("__FLYER_URL__", esc(monday_url, quote=True))
             .replace("__WEEKEND_URL__", esc(weekend_url, quote=True))
@@ -829,9 +805,12 @@ def main() -> int:
         print("ERROR: zero images extracted; refusing to deploy.", file=sys.stderr)
         return 1
 
+    store_location = extract_location(weekend_html) or extract_location(monday_html)
+
     exclusive = find_exclusive_userscript(weekend_items, monday_items) if MATCH_MODE == "userscript" else find_exclusive(weekend_items, monday_items)
     exclusive_urls = {i.url for i in exclusive}
 
+    print(f"Location: {store_location}")
     print(f"Total weekend items: {len(weekend_items)} | New exclusives highlighted: {len(exclusive_urls)}")
     n_priced = sum(1 for i in weekend_items if parse_price(i.label))
     n_clr = sum(1 for i in weekend_items if is_clearance(i.label))
@@ -839,11 +818,10 @@ def main() -> int:
     print(f"Prices found: {n_priced}/{len(weekend_items)} | .97 clearance: {n_clr} | "
           f"end dates found: {n_dated}/{len(weekend_items)}")
 
-    # Read the previously deployed state BEFORE we publish a new one.
     prev_state, state_ok = load_previous_state(scraper)
 
     (OUTPUT_DIR / "index.html").write_text(
-        render_html(weekend_items, exclusive_urls, monday_url, weekend_url, len(monday_items)),
+        render_html(weekend_items, exclusive_urls, monday_url, weekend_url, store_location),
         encoding="utf-8")
     (OUTPUT_DIR / "state.json").write_text(json.dumps({
         "weekend_url": weekend_url,
