@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Scrape CocoWest.ca for the weekly Costco flyer post vs the Weekend Update post,
-display ALL weekend items with exclusive ones highlighted, include an interactive
-shopping list, flag .97 clearance prices and end dates, and email you when a NEW
-weekend post shows up.
+display ALL items with exclusive ones highlighted, store location parsed,
+interactive shopping list with clipboard export, .97 clearance prices, end dates,
+and email alerts when a new weekend post drops.
 
 Env overrides:
   MONDAY_URL, WEEKEND_URL      skip homepage discovery
@@ -12,7 +12,6 @@ Env overrides:
 
 Email alert (skipped, with a log message, if the MAIL_* values are missing):
   MAIL_USERNAME, MAIL_PASSWORD, MAIL_TO   Gmail address + app password, recipient(s)
-                                          (MAIL_TO may be comma-separated)
   MAIL_HOST (smtp.gmail.com), MAIL_PORT (465)
   FORCE_NOTIFY=1               send the email even if this weekend post was already announced
   SITE_URL                     public page URL; defaults to https://<owner>.github.io/<repo>/
@@ -42,7 +41,6 @@ OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "public"))
 DEBUG = os.getenv("DEBUG") == "1"
 MATCH_MODE = os.getenv("MATCH_MODE", "smart").lower()
 
-# Public URL of the deployed page (used for the state file and the email link).
 _owner, _, _repo = os.getenv("GITHUB_REPOSITORY", "").partition("/")
 SITE_URL = os.getenv("SITE_URL") or (
     f"https://{_owner.lower()}.github.io/{_repo}/" if _owner and _repo else "")
@@ -54,7 +52,6 @@ MONDAY_RE = re.compile(os.getenv("MONDAY_RE", r"flyer"), re.I)
 WEEKEND_RE = re.compile(os.getenv("WEEKEND_RE", r"weekend"), re.I)
 
 FUZZY_THRESHOLD = 0.92
-STRIP_SIZE_SUFFIX = False
 
 CHALLENGE_MARKERS = ("just a moment", "cf-browser-verification", "challenge-platform",
                      "attention required", "enable javascript and cookies")
@@ -122,10 +119,6 @@ def discover_posts(home_html: str):
     monday = os.getenv("MONDAY_URL") or monday
     weekend = os.getenv("WEEKEND_URL") or weekend
     return monday, weekend
-
-def end_day(url: str):
-    m = re.search(r"(\d{1,2})-(\d{1,2})-20\d\d", url)
-    return m.group(2) if m else None
 
 IMG_URL_RE = re.compile(
     r"^(https?:)?//\S+?\.(jpe?g|png|webp|gif|avif)(\?\S*)?$|^/\S+?\.(jpe?g|png|webp|gif|avif)(\?\S*)?$",
@@ -239,14 +232,10 @@ def find_item_no(alt: str, url: str) -> str:
     return m.group(1) if m else ""
 
 def reject_reason(img, url: str, container):
-    """Return None if the image should be kept, else a short reason string."""
     u = urlparse(url)
-
-    # Gather all text associated with this image to catch promo banners reliably
     fig = img.find_parent("figure")
     cap = fig.find("figcaption") if fig else None
     cap_text = cap.get_text(" ", strip=True) if cap else ""
-
     blob = " ".join([
         img.get("alt") or "",
         img.get("title") or "",
@@ -254,10 +243,8 @@ def reject_reason(img, url: str, container):
         Path(u.path).name
     ]).lower()
 
-    # Reject non-product promotional site banners
     if "what is on sale next week" in blob or "sales from last year" in blob:
         return "promo_banner"
-
     if any(h in u.netloc.lower() for h in BAD_HOSTS):
         return "bad_host"
     if u.path.lower().endswith((".svg", ".ico")):
@@ -274,7 +261,18 @@ def reject_reason(img, url: str, container):
         return "bad_region"
     return None
 
-def extract_from(container, page_url: str, stats: Counter):
+def extract_items(post_html: str, page_url: str):
+    soup = BeautifulSoup(post_html, "html.parser")
+    for sel in CONTAINER_SELECTORS:
+        el = soup.select_one(sel)
+        if el is not None and el.find("img"):
+            items, _ = extract_from(el, page_url)
+            if items:
+                return items
+    items, _ = extract_from(soup, page_url)
+    return items
+
+def extract_from(container, page_url: str):
     imgs = list(container.find_all("img"))
     for ns in container.find_all("noscript"):
         if ns.string:
@@ -305,16 +303,16 @@ def extract_from(container, page_url: str, stats: Counter):
                           us_key=userscript_key(img), item_no=item_no))
     return items, imgs
 
-def extract_items(post_html: str, page_url: str):
+def extract_location(post_html: str) -> str:
     soup = BeautifulSoup(post_html, "html.parser")
-    for sel in CONTAINER_SELECTORS:
-        el = soup.select_one(sel)
-        if el is not None and el.find("img"):
-            items, _ = extract_from(el, page_url, Counter())
-            if items:
-                return items
-    items, _ = extract_from(soup, page_url, Counter())
-    return items
+    text = soup.get_text(" ", strip=True)
+    m = re.search(r"Location:\s*([A-Za-z0-9\s\(\),_-]+?)(?=\.\s|Hi\s|Hello\s|$)", text, re.I)
+    if m:
+        return m.group(1).strip()
+    m2 = re.search(r"Location:\s*([^<\n\r]+)", post_html, re.I)
+    if m2:
+        return m2.group(1).strip().split("<")[0]
+    return ""
 
 def find_exclusive(weekend_items, monday_items):
     mon_nos = {i.item_no for i in monday_items if i.item_no}
@@ -343,28 +341,21 @@ def find_exclusive_userscript(weekend_items, monday_items):
     return [i for i in weekend_items if i.us_key and i.us_key not in mon]
 
 
-# ------------------------------------------------- price + end-date parsing
-
-# Captions look like:
-#   "1896304 KITCHENAID OVEN MITT SET 4 PIECES ($5.00 INSTANT SAVINGS EXPIRES ON 2026-10-25) $19.99"
+# Price and end-date parsing
 PRICE_RE = re.compile(r"\$\s?(\d[\d,]*)\.(\d{2})\b")
 END_RE = re.compile(
     r"(?:EXPIRES|ENDS|VALID\s+(?:UNTIL|THROUGH|THRU))\s+(?:ON\s+)?(\d{4}-\d{2}-\d{2})", re.I)
 
 def parse_price(label: str):
-    """Final shelf price as (dollars, cents) strings, or None.
-    Amounts inside parentheses (the instant-savings amount) are ignored."""
     text = re.sub(r"\([^)]*\)", " ", label or "")
     found = PRICE_RE.findall(text)
     return found[-1] if found else None
 
 def is_clearance(label: str) -> bool:
-    """Prices ending in .97 are treated as clearance."""
     p = parse_price(label)
     return bool(p) and p[1] == "97"
 
 def parse_end_date(label: str) -> str:
-    """'... EXPIRES ON 2026-10-25 ...' -> '2026-10-25' (validated), else ''."""
     m = END_RE.search(label or "")
     if not m:
         return ""
@@ -375,16 +366,10 @@ def parse_end_date(label: str) -> str:
     return m.group(1)
 
 
-# --------------------------------------------------------- state + alerting
-
+# State and alerting
 def load_previous_state(scraper):
-    """Fetch state.json from the already-deployed site.
-    Returns (state_dict, reachable).
-      200 -> (state, True)
-      404 -> ({}, True)    first run, nothing deployed yet
-      anything else / network error -> ({}, False)  (we then skip the email to avoid duplicates)"""
     if not STATE_URL:
-        print("[state] no site URL known (GITHUB_REPOSITORY / SITE_URL unset); skipping state check")
+        print("[state] no site URL known; skipping state check")
         return {}, False
     try:
         r = scraper.get(f"{STATE_URL}?t={int(time.time())}", timeout=30)
@@ -392,7 +377,6 @@ def load_previous_state(scraper):
             return r.json(), True
         if r.status_code == 404:
             return {}, True
-        print(f"[state] unexpected HTTP {r.status_code} for {STATE_URL}", file=sys.stderr)
     except Exception as exc:
         print(f"[state] could not load previous state: {exc!r}", file=sys.stderr)
     return {}, False
@@ -401,11 +385,8 @@ def send_email(subject: str, body: str) -> bool:
     user = os.getenv("MAIL_USERNAME")
     password = os.getenv("MAIL_PASSWORD")
     to = os.getenv("MAIL_TO")
-    missing = [n for n, v in (("MAIL_USERNAME", user), ("MAIL_PASSWORD", password), ("MAIL_TO", to)) if not v]
-    if missing:
-        print(f"[email] skipped: {', '.join(missing)} not set. "
-              "Add them under Settings > Secrets and variables > Actions, and pass them in the "
-              "workflow's 'Run scraper script' step via env:.")
+    if not (user and password and to):
+        print("[email] skipped: MAIL_* secrets not set.")
         return False
 
     recipients = [e.strip() for e in to.split(",") if e.strip()]
@@ -423,10 +404,7 @@ def send_email(subject: str, body: str) -> bool:
             smtp.send_message(msg, to_addrs=recipients)
         print(f"[email] sent to {', '.join(recipients)}")
         return True
-    except smtplib.SMTPAuthenticationError as exc:
-        print(f"[email] login rejected ({exc.smtp_code}). For Gmail, MAIL_PASSWORD must be a 16-character "
-              "App Password (needs 2-Step Verification), not your normal password.", file=sys.stderr)
-    except Exception as exc:  # never fail the whole run because of email
+    except Exception as exc:
         print(f"[email] failed: {exc!r}", file=sys.stderr)
     return False
 
@@ -434,35 +412,26 @@ def maybe_notify(prev_state, state_ok, weekend_url, monday_url, weekend_items, e
     force = os.getenv("FORCE_NOTIFY") == "1"
     is_new_post = weekend_url != prev_state.get("weekend_url")
     if not (force or (is_new_post and state_ok)):
-        reason = "already announced this weekend post" if state_ok else "previous state unreachable"
-        print(f"[email] not sending ({reason}); set FORCE_NOTIFY=1 to send anyway")
+        print("[email] not sending notification (already announced or state unreachable)")
         return
 
     lines = [
         f"CocoWest weekend deals updated: {len(weekend_items)} items in the weekend post, "
-        f"{len(exclusive)} of them not in the flyer.",
-        "",
+        f"{len(exclusive)} new exclusives.",
         f"Browse them: {SITE_URL or '(site URL unknown)'}",
-        f"Weekend post: {weekend_url}",
-        f"Flyer post:   {monday_url}",
-        "",
-        "New items:" if exclusive else "No new exclusives this time.",
+        f"Weekend post: {weekend_url}"
     ]
-    lines += [f"  - {i.label[:90]}" for i in exclusive[:20]]
-    if len(exclusive) > 20:
-        lines.append(f"  ... and {len(exclusive) - 20} more")
     send_email(f"CocoWest: {len(exclusive)} new weekend deals", "\n".join(lines))
 
 
-# ------------------------------------------------------------------- output
-
+# Dashboard HTML Template
 PAGE_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#1b8a3a">
-<title>CocoWest Weekend Deals (__TOTAL__ items)</title>
+<title>Costco Deals Dashboard</title>
 <style>
   :root {
     --bg:#f4f5f7; --fg:#1a1a1a; --card:#ffffff; --muted:#666; --line:#e2e2e2;
@@ -476,25 +445,20 @@ PAGE_TEMPLATE = """<!doctype html>
   }
   * { box-sizing:border-box; }
   [hidden] { display:none !important; }
-  html { -webkit-text-size-adjust:100%; }
-  body { margin:0; background:var(--bg); color:var(--fg); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-         padding-bottom:3rem; padding-left:env(safe-area-inset-left,0px); padding-right:env(safe-area-inset-right,0px); }
-  .bar { position:sticky; top:0; z-index:10; background:var(--bar); -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px);
-         border-bottom:1px solid var(--line); padding:calc(.6rem + env(safe-area-inset-top,0px)) .8rem .6rem; }
+  body { margin:0; background:var(--bg); color:var(--fg); font-family:system-ui,-apple-system,sans-serif; padding-bottom:3rem; }
+  .bar { position:sticky; top:0; z-index:10; background:var(--bar); backdrop-filter:blur(8px); border-bottom:1px solid var(--line); padding:.6rem .8rem; }
   .bar-row { max-width:1200px; margin:0 auto; display:flex; align-items:center; justify-content:space-between; gap:.6rem; }
   .title { font-size:1.05rem; font-weight:700; }
-  .badge-btn { background:var(--accent); color:var(--on-accent); border:none; border-radius:999px; padding:.35rem .85rem;
-               font-size:.9rem; font-weight:700; cursor:pointer; white-space:nowrap; }
+  .badge-btn { background:var(--accent); color:var(--on-accent); border:none; border-radius:999px; padding:.35rem .85rem; font-size:.9rem; font-weight:700; cursor:pointer; white-space:nowrap; }
   .badge-btn.gray { background:#6c757d; color:#fff; }
   .badge-btn.active { background:var(--danger); color:#fff; }
   .search { max-width:1200px; margin:.5rem auto 0; display:flex; gap:.5rem; }
-  .search input { flex:1; min-width:0; padding:.6rem .8rem; font-size:16px; border:1px solid var(--line); border-radius:10px;
-                  background:var(--card); color:var(--fg); }
+  .search input { flex:1; min-width:0; padding:.6rem .8rem; font-size:16px; border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--fg); }
   .toolbar { max-width:1200px; margin:.6rem auto 0; padding:0 .8rem; display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; }
-  .chip { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:999px; padding:.3rem .75rem;
-          font-size:.85rem; font-weight:600; cursor:pointer; }
+  .chip { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:999px; padding:.3rem .75rem; font-size:.85rem; font-weight:600; cursor:pointer; }
   .chip.active { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
   .chip.danger { color:var(--danger); border-color:var(--danger); }
+  .chip.info { background:#007bff; color:#fff; border-color:#007bff; }
   .cols-toggle { display:none; align-items:center; gap:.35rem; margin-left:auto; font-size:.8rem; color:var(--muted); }
   .seg { display:inline-flex; border:1px solid var(--line); border-radius:999px; overflow:hidden; }
   .seg button { border:none; background:var(--card); color:var(--fg); padding:.3rem .7rem; font-size:.85rem; font-weight:700; cursor:pointer; }
@@ -502,19 +466,15 @@ PAGE_TEMPLATE = """<!doctype html>
   .meta { max-width:1200px; margin:.6rem auto .2rem; padding:0 .8rem; color:var(--muted); font-size:.8rem; line-height:1.5; }
   .meta a { color:inherit; }
   .grid { max-width:1200px; margin:.6rem auto; padding:0 .8rem; display:grid; gap:.8rem; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); }
-  .card { margin:0; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; position:relative;
-          display:flex; flex-direction:column; justify-content:space-between; }
+  .card { margin:0; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; position:relative; display:flex; flex-direction:column; justify-content:space-between; }
   .card.is-new { border:2px solid var(--highlight-border); background:var(--highlight); }
   .card.is-expired img, .card.is-expired figcaption { opacity:.5; }
-  .new-tag { position:absolute; top:8px; left:8px; background:#28a745; color:#fff; font-size:.7rem; font-weight:bold; padding:2px 6px;
-             border-radius:4px; z-index:2; text-transform:uppercase; }
-  .clr-tag { position:absolute; top:8px; right:8px; background:#6f42c1; color:#fff; font-size:.7rem; font-weight:bold; padding:2px 6px;
-             border-radius:4px; z-index:2; }
+  .new-tag { position:absolute; top:8px; left:8px; background:#28a745; color:#fff; font-size:.7rem; font-weight:bold; padding:2px 6px; border-radius:4px; z-index:2; text-transform:uppercase; }
+  .clr-tag { position:absolute; top:8px; right:8px; background:#6f42c1; color:#fff; font-size:.7rem; font-weight:bold; padding:2px 6px; border-radius:4px; z-index:2; }
   .card a { display:block; }
   .card img { width:100%; aspect-ratio:1/1; object-fit:contain; display:block; background:#fff; }
   .card figcaption { padding:.5rem .6rem; font-size:.85rem; line-height:1.3; flex-grow:1; overflow-wrap:anywhere; }
-  .card-footer { padding:.4rem .6rem .6rem; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.3rem;
-                 border-top:1px solid var(--line); font-size:.8rem; }
+  .card-footer { padding:.4rem .6rem .6rem; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.3rem; border-top:1px solid var(--line); font-size:.8rem; }
   .shop-label { display:flex; align-items:center; gap:.4rem; cursor:pointer; font-weight:500; }
   .shop-label input { width:1.1rem; height:1.1rem; accent-color:var(--accent); cursor:pointer; }
   .end-badge { font-size:.72rem; font-weight:700; padding:2px 8px; border-radius:999px; white-space:nowrap; }
@@ -529,23 +489,17 @@ PAGE_TEMPLATE = """<!doctype html>
     .toolbar { padding:0 .6rem; }
     .grid { padding:0 .5rem; gap:.5rem; grid-template-columns:minmax(0,1fr); }
     .grid.c2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
-    .grid.c2 .card { border-radius:10px; }
-    .grid.c2 .card figcaption { font-size:.72rem; padding:.4rem .45rem; }
-    .grid.c2 .card-footer { padding:.35rem .45rem .5rem; font-size:.72rem; }
-    .grid.c2 .new-tag, .grid.c2 .clr-tag { font-size:.6rem; top:5px; }
-    .grid.c2 .new-tag { left:5px; }
-    .grid.c2 .clr-tag { right:5px; }
-    .grid.c2 .end-badge { font-size:.65rem; padding:2px 6px; }
-    .title { font-size:.95rem; }
-    .meta { padding:0 .6rem; }
   }
 </style>
 </head>
 <body>
 <header class="bar">
   <div class="bar-row">
-    <div class="title">&#128717;&#65039; Costco Weekend Deals</div>
-    <button class="badge-btn" id="list-toggle" type="button">&#128722; List (0)</button>
+    <div class="title">&#128717;&#65039; Costco Deals</div>
+    <div style="display:flex; gap:.4rem;">
+      <button class="badge-btn gray" id="copy-btn" type="button" title="Copy checked list">📋 Copy</button>
+      <button class="badge-btn" id="list-toggle" type="button">&#128722; List (0)</button>
+    </div>
   </div>
   <div class="search">
     <input id="q" type="search" placeholder="Filter by name or item number..." autocomplete="off">
@@ -553,6 +507,7 @@ PAGE_TEMPLATE = """<!doctype html>
   </div>
 </header>
 <div class="toolbar">
+  <button class="chip info" id="source-toggle" type="button">📅 Showing: Weekend Update</button>
   <button class="chip" id="new-toggle" type="button" aria-pressed="false">&#10024; New only (__NEW_COUNT__)</button>
   <button class="chip" id="clr-toggle" type="button" aria-pressed="false">&#127991;&#65039; .97 clearance (__CLR_COUNT__)</button>
   <button class="chip" id="week-toggle" type="button" aria-pressed="false">&#9200; Ends this week (0)</button>
@@ -566,8 +521,8 @@ PAGE_TEMPLATE = """<!doctype html>
   </div>
 </div>
 <div class="meta">
-  Showing <b id="shown-count">__TOTAL__</b> of <b>__TOTAL__</b> weekend items (<b>__NEW_COUNT__</b> new exclusives highlighted) &middot; updated __STAMP__<br>
-  &#127991;&#65039; .97 price = clearance &middot; end-date badges are measured from today (Costco weeks run Mon&ndash;Sun)<br>
+  📍 Store Location: <b>__LOCATION__</b><br>
+  Showing <b id="shown-count">__TOTAL__</b> items &middot; updated __STAMP__<br>
   Sources: <a href="__FLYER_URL__">Monday Flyer</a> &middot; <a href="__WEEKEND_URL__">Weekend Update</a>
 </div>
 <main class="grid c2" id="grid">
@@ -591,8 +546,6 @@ __CARDS__
     try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
   }
 
-  // BEGIN classify
-  // "Ends this week" = ends between today and this coming Sunday (Costco weeks run Mon-Sun).
   function classifyEnd(s, today) {
     var p = s.split('-');
     var end = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
@@ -605,11 +558,12 @@ __CARDS__
     if (left === 1) return { cls: 'tomorrow', text: 'Ends tomorrow', inWeek: true, expired: false };
     return { cls: 'week', text: 'Ends ' + DAYS[end.getDay()], inWeek: true, expired: false };
   }
-  // END classify
 
   var q = document.getElementById('q');
   var grid = document.getElementById('grid');
   var listBtn = document.getElementById('list-toggle');
+  var copyBtn = document.getElementById('copy-btn');
+  var sourceBtn = document.getElementById('source-toggle');
   var newBtn = document.getElementById('new-toggle');
   var clrBtn = document.getElementById('clr-toggle');
   var weekBtn = document.getElementById('week-toggle');
@@ -623,9 +577,8 @@ __CARDS__
 
   var shoppingList = load(LIST_KEY, []);
   if (!Array.isArray(shoppingList)) shoppingList = [];
-  var state = { listOnly: false, newOnly: false, clrOnly: false, weekOnly: false };
+  var state = { listOnly: false, newOnly: false, clrOnly: false, weekOnly: false, viewingMonday: false };
 
-  // End-date badges, measured against the viewer's current date
   var now = new Date();
   var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   cards.forEach(function (el) {
@@ -640,27 +593,19 @@ __CARDS__
     if (r.inWeek) el.setAttribute('data-week', '1');
   });
 
-  function countWhere(fn) {
-    var n = 0;
-    cards.forEach(function (el) { if (fn(el)) n++; });
-    return n;
-  }
-  newBtn.innerHTML = '&#10024; New only (' + countWhere(function (el) { return el.classList.contains('is-new'); }) + ')';
-  clrBtn.innerHTML = '&#127991;&#65039; .97 clearance (' + countWhere(function (el) { return el.classList.contains('is-clr'); }) + ')';
-  weekBtn.innerHTML = '&#9200; Ends this week (' + countWhere(function (el) { return el.getAttribute('data-week') === '1'; }) + ')';
-
   function inList(url) { return shoppingList.indexOf(url) !== -1; }
-
-  // Only count list entries that are on this page (older weeks' entries stay invisible).
   function listCountOnPage() {
-    return countWhere(function (el) { return inList(el.getAttribute('data-url')); });
+    return cards.filter(function (el) { return inList(el.getAttribute('data-url')); }).length;
   }
 
   function render() {
     var t = q.value.trim().toLowerCase();
     var shown = 0;
     cards.forEach(function (el) {
-      var ok = (!t || el.getAttribute('data-t').indexOf(t) !== -1) &&
+      var isMonday = el.classList.contains('is-monday');
+      var matchesSource = state.viewingMonday ? isMonday : !isMonday;
+      var ok = matchesSource &&
+               (!t || el.getAttribute('data-t').indexOf(t) !== -1) &&
                (!state.newOnly || el.classList.contains('is-new')) &&
                (!state.clrOnly || el.classList.contains('is-clr')) &&
                (!state.weekOnly || el.getAttribute('data-week') === '1') &&
@@ -672,7 +617,11 @@ __CARDS__
     var n = listCountOnPage();
     listBtn.innerHTML = state.listOnly ? 'Show all items' : '&#128722; List (' + n + ')';
     listBtn.classList.toggle('active', state.listOnly);
-    [[newBtn, state.newOnly], [clrBtn, state.clrOnly], [weekBtn, state.weekOnly]].forEach(function (pair) {
+    sourceBtn.textContent = state.viewingMonday ? '📅 Showing: Monday Flyer' : '📅 Showing: Weekend Update';
+    newBtn.style.opacity = state.viewingMonday ? '0.4' : '1';
+    newBtn.disabled = state.viewingMonday;
+    
+    [[clrBtn, state.clrOnly], [weekBtn, state.weekOnly]].forEach(function (pair) {
       pair[0].classList.toggle('active', pair[1]);
       pair[0].setAttribute('aria-pressed', pair[1] ? 'true' : 'false');
     });
@@ -681,14 +630,11 @@ __CARDS__
     shownEl.textContent = shown;
 
     if (shown === 0) {
-      emptyMsg.textContent = (state.listOnly && n === 0)
-        ? 'Your list is empty. Tick "Add to list" on any item.'
-        : 'No items match your filters.';
+      emptyMsg.textContent = 'No items match your filters.';
     }
     emptyMsg.hidden = shown !== 0;
   }
 
-  // Shopping list checkboxes
   checks.forEach(function (chk) {
     var url = chk.getAttribute('data-url');
     chk.checked = inList(url);
@@ -703,23 +649,47 @@ __CARDS__
     });
   });
 
+  sourceBtn.addEventListener('click', function () {
+    state.viewingMonday = !state.viewingMonday;
+    if (state.viewingMonday) state.newOnly = false;
+    render();
+  });
   listBtn.addEventListener('click', function () { state.listOnly = !state.listOnly; render(); });
-  newBtn.addEventListener('click', function () { state.newOnly = !state.newOnly; render(); });
+  newBtn.addEventListener('click', function () { if (!state.viewingMonday) { state.newOnly = !state.newOnly; render(); } });
   clrBtn.addEventListener('click', function () { state.clrOnly = !state.clrOnly; render(); });
   weekBtn.addEventListener('click', function () { state.weekOnly = !state.weekOnly; render(); });
   q.addEventListener('input', render);
 
-  // Reset = clear search + all filters + list view (does NOT touch your saved list)
+  copyBtn.addEventListener('click', function () {
+    if (shoppingList.length === 0) {
+      alert('Your shopping list is empty!');
+      return;
+    }
+    var itemsText = [];
+    cards.forEach(function (el) {
+      var url = el.getAttribute('data-url');
+      if (inList(url)) {
+        var label = el.querySelector('figcaption').textContent.trim();
+        itemsText.push('- ' + label);
+      }
+    });
+    navigator.clipboard.writeText("Costco Shopping List:\n" + itemsText.join('\n')).then(function () {
+      alert('Shopping list copied to clipboard!');
+    }).catch(function (err) {
+      alert('Failed to copy: ' + err);
+    });
+  });
+
   resetBtn.addEventListener('click', function () {
     q.value = '';
     state.newOnly = false;
     state.clrOnly = false;
     state.weekOnly = false;
     state.listOnly = false;
+    state.viewingMonday = false;
     render();
   });
 
-  // Clear list = untick everything and forget the saved list
   clearBtn.addEventListener('click', function () {
     var n = listCountOnPage();
     if (!n) return;
@@ -731,7 +701,6 @@ __CARDS__
     render();
   });
 
-  // 1 or 2 products per row (phones only; remembered)
   function setCols(n) {
     n = (n === 1) ? 1 : 2;
     grid.classList.remove('c1', 'c2');
@@ -754,13 +723,15 @@ __CARDS__
 </body>
 </html>"""
 
-def render_html(weekend_items, exclusive_urls, monday_url, weekend_url, n_monday) -> str:
+def render_html(weekend_items, monday_items, exclusive_urls, monday_url, weekend_url, store_location) -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     esc = html.escape
     new_count = len(exclusive_urls)
-    clr_count = sum(1 for i in weekend_items if is_clearance(i.label))
+    all_items_for_clr = list(weekend_items) + list(monday_items)
+    clr_count = sum(1 for i in all_items_for_clr if is_clearance(i.label))
 
     cards = []
+    # Render Weekend Items
     for i in weekend_items:
         is_new = i.url in exclusive_urls
         clearance = is_clearance(i.label)
@@ -794,12 +765,43 @@ def render_html(weekend_items, exclusive_urls, monday_url, weekend_url, n_monday
   </div>
 </figure>''')
 
-    cards_html = "\n".join(cards) or '<p class="empty">No weekend items found.</p>'
+    # Render Monday Items
+    for i in monday_items:
+        clearance = is_clearance(i.label)
+        end = parse_end_date(i.label)
+
+        classes = ["card", "is-monday"]
+        if clearance:
+            classes.append("is-clr")
+
+        attrs = f'data-t="{esc(i.label.lower(), quote=True)}" data-url="{esc(i.url, quote=True)}"'
+        if end:
+            attrs += f' data-end="{end}"'
+
+        clr_tag = '<div class="clr-tag">&#127991;&#65039; .97</div>' if clearance else ''
+        end_badge = '<span class="end-badge" hidden></span>' if end else ''
+
+        cards.append(f'''<figure class="{' '.join(classes)}" {attrs}>
+  {clr_tag}
+  <a href="{esc(i.url, quote=True)}" target="_blank" rel="noopener">
+    <img src="{esc(i.url, quote=True)}" alt="{esc(i.label, quote=True)}" loading="lazy" referrerpolicy="no-referrer">
+  </a>
+  <figcaption>{esc(i.label)}</figcaption>
+  <div class="card-footer">
+    <label class="shop-label">
+      <input type="checkbox" class="shop-check" data-url="{esc(i.url, quote=True)}"> Add to list
+    </label>
+    {end_badge}
+  </div>
+</figure>''')
+
+    cards_html = "\n".join(cards) or '<p class="empty">No items found.</p>'
 
     return (PAGE_TEMPLATE
             .replace("__TOTAL__", str(len(weekend_items)))
             .replace("__NEW_COUNT__", str(new_count))
             .replace("__CLR_COUNT__", str(clr_count))
+            .replace("__LOCATION__", esc(store_location or "Metro Vancouver Area"))
             .replace("__STAMP__", stamp)
             .replace("__FLYER_URL__", esc(monday_url, quote=True))
             .replace("__WEEKEND_URL__", esc(weekend_url, quote=True))
@@ -816,7 +818,6 @@ def main() -> int:
     if not (monday_url and weekend_url):
         print("ERROR: could not find both posts.", file=sys.stderr)
         return 1
-    print(f"Flyer  : {monday_url}\nWeekend: {weekend_url}")
 
     monday_html = fetch(scraper, monday_url)
     time.sleep(random.uniform(1, 3))
@@ -829,21 +830,18 @@ def main() -> int:
         print("ERROR: zero images extracted; refusing to deploy.", file=sys.stderr)
         return 1
 
+    store_location = extract_location(weekend_html) or extract_location(monday_html)
+
     exclusive = find_exclusive_userscript(weekend_items, monday_items) if MATCH_MODE == "userscript" else find_exclusive(weekend_items, monday_items)
     exclusive_urls = {i.url for i in exclusive}
 
-    print(f"Total weekend items: {len(weekend_items)} | New exclusives highlighted: {len(exclusive_urls)}")
-    n_priced = sum(1 for i in weekend_items if parse_price(i.label))
-    n_clr = sum(1 for i in weekend_items if is_clearance(i.label))
-    n_dated = sum(1 for i in weekend_items if parse_end_date(i.label))
-    print(f"Prices found: {n_priced}/{len(weekend_items)} | .97 clearance: {n_clr} | "
-          f"end dates found: {n_dated}/{len(weekend_items)}")
+    print(f"Location: {store_location}")
+    print(f"Total weekend items: {len(weekend_items)} | Monday items: {len(monday_items)} | New exclusives: {len(exclusive_urls)}")
 
-    # Read the previously deployed state BEFORE we publish a new one.
     prev_state, state_ok = load_previous_state(scraper)
 
     (OUTPUT_DIR / "index.html").write_text(
-        render_html(weekend_items, exclusive_urls, monday_url, weekend_url, len(monday_items)),
+        render_html(weekend_items, monday_items, exclusive_urls, monday_url, weekend_url, store_location),
         encoding="utf-8")
     (OUTPUT_DIR / "state.json").write_text(json.dumps({
         "weekend_url": weekend_url,
