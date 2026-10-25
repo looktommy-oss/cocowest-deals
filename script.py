@@ -17,6 +17,7 @@ import random
 import re
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -136,6 +137,9 @@ KNOWN_LAZY_ATTRS = ("data-src", "data-lazy-src", "data-original", "data-orig-fil
                     "data-large-file", "data-full-url", "data-lazy", "data-img-src")
 SRCSET_ATTRS = ("data-srcset", "data-lazy-srcset", "srcset")
 
+CONTAINER_SELECTORS = ("article .entry-content", ".entry-content", ".post-content",
+                       ".single-content", "article", "main", "#content")
+
 BAD_FILENAME_RE = re.compile(
     r"(logo|banner|avatar|gravatar|icon|sprite|emoji|placeholder|spinner|loader|"
     r"button|badge|social|facebook|twitter|instagram|pinterest|youtube|tiktok|"
@@ -158,22 +162,24 @@ class Item:
     file_key: str
 
 
-def in_bad_region(el) -> bool:
+def in_bad_region(el, container) -> bool:
+    """Check only the ancestors between the image and the container (exclusive),
+    and never <body>/<html> (their classes like 'has-sidebar' say nothing about the image)."""
     for parent in el.parents:
+        if parent is container:
+            break
         name = getattr(parent, "name", None)
+        if name in (None, "[document]", "html", "body"):
+            continue
         if name in ("nav", "footer", "aside"):
             return True
         # page-level header only: ignore <header> inside <article> (post title/featured image)
         if name == "header" and not parent.find_parent("article"):
             return True
-        if not hasattr(parent, "get"):
-            continue
         classes = " ".join(parent.get("class", []))
         pid = parent.get("id", "") or ""
         if (classes or pid) and BAD_CLASS_RE.search(f"{classes} {pid}"):
-            # never exclude the post body itself
-            if not re.search(r"(entry-content|post-content|article-content)", classes):
-                return True
+            return True
     return False
 
 
@@ -238,47 +244,47 @@ def pretty_name(url: str) -> str:
     return re.sub(r"[-_]+", " ", name).strip().title()
 
 
-def passes_filters(img, url: str) -> bool:
+def reject_reason(img, url: str, container):
+    """Return None if the image should be kept, else a short reason string."""
     u = urlparse(url)
     if any(h in u.netloc.lower() for h in BAD_HOSTS):
-        return False
+        return "bad_host"
     if u.path.lower().endswith((".svg", ".ico")):
-        return False
+        return "svg_or_ico"
     if BAD_FILENAME_RE.search(Path(u.path).name):
-        return False
+        return "bad_filename"
     try:
         w, h = int(img.get("width", 0)), int(img.get("height", 0))
         if (w and w < 120) or (h and h < 120):
-            return False
+            return "too_small"
     except ValueError:
         pass
-    if in_bad_region(img):
-        return False
-    return True
+    if in_bad_region(img, container):
+        return "bad_region"
+    return None
 
 
-def extract_items(post_html: str, page_url: str):
-    soup = BeautifulSoup(post_html, "html.parser")
-    container = (soup.select_one("article .entry-content") or soup.select_one(".entry-content")
-                 or soup.select_one(".post-content") or soup.select_one("article")
-                 or soup.select_one("main") or soup)
-
+def extract_from(container, page_url: str, stats: Counter):
     imgs = list(container.find_all("img"))
     # <noscript> fallbacks: html.parser exposes children directly (already covered above),
     # but with other parsers the content is a string, so handle that case too.
     for ns in container.find_all("noscript"):
         if ns.string:
             imgs.extend(BeautifulSoup(ns.string, "html.parser").find_all("img"))
+    stats["img_tags_in_container"] = len(imgs)
 
     items, seen = [], set()
     for img in imgs:
         cands = candidate_urls(img)
         if not cands:
+            stats["rejected:no_usable_url"] += 1
             continue
         url = urljoin(page_url, cands[0])
         if STRIP_SIZE_SUFFIX:
             url = strip_size_suffix(url)
-        if not passes_filters(img, url):
+        reason = reject_reason(img, url, container)
+        if reason:
+            stats[f"rejected:{reason}"] += 1
             continue
 
         alt = (img.get("alt") or img.get("title") or "").strip()
@@ -292,11 +298,42 @@ def extract_items(post_html: str, page_url: str):
         file_key = filename_key(url)
         dedupe_key = file_key or alt_key or url
         if dedupe_key in seen:
+            stats["rejected:duplicate"] += 1
             continue
         seen.add(dedupe_key)
 
         items.append(Item(url=url, label=alt if good_alt else pretty_name(url),
                           alt=alt, alt_key=alt_key, file_key=file_key))
+    return items, imgs
+
+
+def extract_items(post_html: str, page_url: str, name: str = ""):
+    soup = BeautifulSoup(post_html, "html.parser")
+
+    # Try each plausible post-body container, then the whole document, until one yields items.
+    containers = []
+    for sel in CONTAINER_SELECTORS:
+        el = soup.select_one(sel)
+        if el is not None and el.find("img"):
+            containers.append((sel, el))
+    containers.append(("(whole document)", soup))
+
+    items, imgs, stats, used = [], [], Counter(), ""
+    for used, el in containers:
+        stats = Counter()
+        items, imgs = extract_from(el, page_url, stats)
+        if items:
+            break
+
+    # ---- diagnostics ----
+    print(f"[{name}] html_bytes={len(post_html)} total_img_tags_on_page={len(soup.find_all('img'))} "
+          f"container={used!r} kept={len(items)}")
+    for k, v in sorted(stats.items()):
+        print(f"[{name}]   {k}: {v}")
+    if not items:
+        print(f"[{name}] no images kept. First raw <img> tags on the page:")
+        for img in soup.find_all("img")[:4]:
+            print("    ", str(img)[:350].replace("\n", " "))
     return items
 
 
@@ -410,8 +447,8 @@ def main() -> int:
         (OUTPUT_DIR / "debug_monday.html").write_text(monday_html, encoding="utf-8")
         (OUTPUT_DIR / "debug_weekend.html").write_text(weekend_html, encoding="utf-8")
 
-    monday_items = extract_items(monday_html, monday_url)
-    weekend_items = extract_items(weekend_html, weekend_url)
+    monday_items = extract_items(monday_html, monday_url, "flyer")
+    weekend_items = extract_items(weekend_html, weekend_url, "weekend")
     print(f"Extracted {len(monday_items)} flyer and {len(weekend_items)} weekend images")
 
     # Safety: an empty result usually means a scrape problem, not "no deals".
