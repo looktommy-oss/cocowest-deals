@@ -512,23 +512,23 @@ def main() -> int:
 
     print(f"Total weekend items: {len(weekend_items)} | New exclusives highlighted: {len(exclusive_urls)}")
 
-(OUTPUT_DIR / "index.html").write_text(
+    (OUTPUT_DIR / "index.html").write_text(
         render_html(weekend_items, exclusive_urls, monday_url, weekend_url, len(monday_items)),
         encoding="utf-8")
 
-import smtplib
-from email.mime.text import MIMEText
+    import smtplib
+    from email.mime.text import MIMEText
+
     mail_user = os.getenv("MAIL_USERNAME")
     mail_pass = os.getenv("MAIL_PASSWORD")
     mail_to = os.getenv("MAIL_TO")
-    
-   if mail_user and mail_pass and mail_to:
+
+    if mail_user and mail_pass and mail_to:
         msg = MIMEText(f"CocoWest Weekend Deals updated successfully! {len(weekend_items)} total items found, {len(exclusive_urls)} new exclusives. Check your dashboard.")
         msg["Subject"] = "Costco Weekend Deals Updated!"
         msg["From"] = mail_user
         msg["To"] = mail_to
         
-        # Split comma-separated emails for multiple recipients
         recipients = [email.strip() for email in mail_to.split(",")]
         
         try:
@@ -538,7 +538,7 @@ from email.mime.text import MIMEText
             print("[email] Notification sent successfully.")
         except Exception as e:
             print(f"[email] Failed to send email: {e}", file=sys.stderr)
-  
+
     return 0
 
 if __name__ == "__main__":
