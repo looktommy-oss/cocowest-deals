@@ -497,7 +497,7 @@ PAGE_TEMPLATE = """<!doctype html>
   <div class="bar-row">
     <div class="title">&#128717;&#65039; Costco Deals</div>
     <div style="display:flex; gap:.4rem;">
-      <button class="badge-btn gray" id="copy-btn" type="button" title="Copy checked list">📋 Copy</button>
+      <button class="badge-btn gray" id="copy-btn" type="button" title="Copy checked list">&#128203; Copy</button>
       <button class="badge-btn" id="list-toggle" type="button">&#128722; List (0)</button>
     </div>
   </div>
@@ -507,7 +507,7 @@ PAGE_TEMPLATE = """<!doctype html>
   </div>
 </header>
 <div class="toolbar">
-  <button class="chip info" id="source-toggle" type="button">📅 Showing: Weekend Update</button>
+  <button class="chip info" id="source-toggle" type="button">&#128197; Showing: Weekend Update</button>
   <button class="chip" id="new-toggle" type="button" aria-pressed="false">&#10024; New only (__NEW_COUNT__)</button>
   <button class="chip" id="clr-toggle" type="button" aria-pressed="false">&#127991;&#65039; .97 clearance (__CLR_COUNT__)</button>
   <button class="chip" id="week-toggle" type="button" aria-pressed="false">&#9200; Ends this week (0)</button>
@@ -521,7 +521,7 @@ PAGE_TEMPLATE = """<!doctype html>
   </div>
 </div>
 <div class="meta">
-  📍 Store Location: <b>__LOCATION__</b><br>
+  &#128205; Store Location: <b>__LOCATION__</b><br>
   Showing <b id="shown-count">__TOTAL__</b> items &middot; updated __STAMP__<br>
   Sources: <a href="__FLYER_URL__">Monday Flyer</a> &middot; <a href="__WEEKEND_URL__">Weekend Update</a>
 </div>
@@ -624,7 +624,7 @@ __CARDS__
       var n = listCountOnPage();
       listBtn.innerHTML = state.listOnly ? 'Show all items' : '&#128722; List (' + n + ')';
       listBtn.classList.toggle('active', state.listOnly);
-      sourceBtn.textContent = state.viewingMonday ? '📅 Showing: Monday Flyer' : '📅 Showing: Weekend Update';
+      sourceBtn.textContent = state.viewingMonday ? '&#128197; Showing: Monday Flyer' : '&#128197; Showing: Weekend Update';
       newBtn.style.opacity = state.viewingMonday ? '0.4' : '1';
       newBtn.disabled = state.viewingMonday;
       
@@ -761,7 +761,10 @@ def render_html(weekend_items, monday_items, exclusive_urls, monday_url, weekend
         if clearance:
             classes.append("is-clr")
 
-        attrs = f'data-index="{idx}" data-t="{esc(i.label.lower(), quote=True)}" data-url="{esc(i.url, quote=True)}"'
+        safe_label = re.sub(r'[\r\n]+', ' ', i.label).strip()
+        safe_label_lower = safe_label.lower()
+
+        attrs = f'data-index="{idx}" data-t="{esc(safe_label_lower, quote=True)}" data-url="{esc(i.url, quote=True)}"'
         if end:
             attrs += f' data-end="{end}"'
 
@@ -772,9 +775,9 @@ def render_html(weekend_items, monday_items, exclusive_urls, monday_url, weekend
         cards.append(f'''<figure class="{' '.join(classes)}" {attrs}>
   {new_tag}{clr_tag}
   <a href="{esc(i.url, quote=True)}" target="_blank" rel="noopener">
-    <img src="{esc(i.url, quote=True)}" alt="{esc(i.label, quote=True)}" loading="lazy" referrerpolicy="no-referrer">
+    <img src="{esc(i.url, quote=True)}" alt="{esc(safe_label, quote=True)}" loading="lazy" referrerpolicy="no-referrer">
   </a>
-  <figcaption>{esc(i.label)}</figcaption>
+  <figcaption>{esc(safe_label)}</figcaption>
   <div class="card-footer">
     <label class="shop-label">
       <input type="checkbox" class="shop-check" data-index="{idx}"> Add to list
@@ -793,7 +796,10 @@ def render_html(weekend_items, monday_items, exclusive_urls, monday_url, weekend
         if clearance:
             classes.append("is-clr")
 
-        attrs = f'data-index="{idx}" data-t="{esc(i.label.lower(), quote=True)}" data-url="{esc(i.url, quote=True)}"'
+        safe_label = re.sub(r'[\r\n]+', ' ', i.label).strip()
+        safe_label_lower = safe_label.lower()
+
+        attrs = f'data-index="{idx}" data-t="{esc(safe_label_lower, quote=True)}" data-url="{esc(i.url, quote=True)}"'
         if end:
             attrs += f' data-end="{end}"'
 
@@ -803,9 +809,9 @@ def render_html(weekend_items, monday_items, exclusive_urls, monday_url, weekend
         cards.append(f'''<figure class="{' '.join(classes)}" {attrs}>
   {clr_tag}
   <a href="{esc(i.url, quote=True)}" target="_blank" rel="noopener">
-    <img src="{esc(i.url, quote=True)}" alt="{esc(i.label, quote=True)}" loading="lazy" referrerpolicy="no-referrer">
+    <img src="{esc(i.url, quote=True)}" alt="{esc(safe_label, quote=True)}" loading="lazy" referrerpolicy="no-referrer">
   </a>
-  <figcaption>{esc(i.label)}</figcaption>
+  <figcaption>{esc(safe_label)}</figcaption>
   <div class="card-footer">
     <label class="shop-label">
       <input type="checkbox" class="shop-check" data-index="{idx}"> Add to list
