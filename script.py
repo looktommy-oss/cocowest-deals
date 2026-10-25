@@ -1,20 +1,12 @@
-#!/usr/bin/env python3
+#!/usr/init/env python3
 """
-Scrape CocoWest.ca for Costco posts with robust post discovery, 
-automatically showing the Monday/Sales flyer early in the week and switching 
-to Weekend Exclusives once the weekend post drops.
-Includes shopping list, store location, clearance tags, and end dates.
+Scrape CocoWest.ca for Costco posts with automatic category tagging and filtering,
+smart date-aware post discovery, shopping list, store location, clearance tags, and end dates.
 
 Env overrides:
   MONDAY_URL, WEEKEND_URL      skip homepage discovery
   MATCH_MODE                   "smart" (default) or "userscript"
   OUTPUT_DIR                   default: public
-
-Email alert (skipped, with a log message, if the MAIL_* values are missing):
-  MAIL_USERNAME, MAIL_PASSWORD, MAIL_TO   Gmail address + app password, recipient(s)
-  MAIL_HOST (smtp.gmail.com), MAIL_PORT (465)
-  FORCE_NOTIFY=1               send the email even if this post was already announced
-  SITE_URL                     public page URL; defaults to https://<owner>.github.io/<repo>/
 """
 import html
 import json
@@ -41,7 +33,6 @@ OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "public"))
 DEBUG = os.getenv("DEBUG") == "1"
 MATCH_MODE = os.getenv("MATCH_MODE", "smart").lower()
 
-# Public URL of the deployed page (used for the state file and the email link).
 _owner, _, _repo = os.getenv("GITHUB_REPOSITORY", "").partition("/")
 SITE_URL = os.getenv("SITE_URL") or (
     f"https://{_owner.lower()}.github.io/{_repo}/" if _owner and _repo else "")
@@ -170,6 +161,23 @@ class Item:
     file_key: str
     us_key: str
     item_no: str
+    category: str
+
+# Category keyword mapping rules
+ CATEGORY_RULES = {
+    "appliances": re.compile(r"\b(toaster|blender|coffee|espresso|air\s*fryer|microwave|mixer|cookware|pan|pot|kettle|vacuum|shaver|toothbrush|fan|heater)\b", re.I),
+    "groceries": re.compile(r"\b(coffee\s*bean|protein|snack|meat|chicken|beef|salmon|shrimp|juice|water|milk|cheese|chips|chocolate|cookie|bar|almond|rice|pasta|sauce|soup|oil|dressing)\b", re.I),
+    "household": re.compile(r"\b(paper\s*towel|toilet\s*paper|tissues?|detergent|dish\s*soap|trash\s*bags?|garbage\s*bags?|foil|ziploc|sponge|cleaner|batteries)\b", re.I),
+    "clothing": re.compile(r"\b(pants?|jeans|hoodie|sweatshirt|socks?|jacket|coat|shirt|shorts?|sweater|underwear|shoes?|boots?|slippers?|gloves?|hat)\b", re.I),
+    "health": re.compile(r"\b(vitamin|supplement|protein\s*powder|shampoo|conditioner|lotion|soap|toothpaste|pain\s*relief|advil|tylenol|multivitamin|collagen)\b", re.I),
+    "home": re.compile(r"\b(pillow|sheet|blanket|duvet|towel|mat|hanger|storage|bin|basket|lamp|bulb|tv|monitor|speaker|headphone|charger|cable)\b", re.I),
+}
+
+def detect_category(label: str) -> str:
+    for cat, pattern in CATEGORY_RULES.items():
+        if pattern.search(label or ""):
+            return cat
+    return "other"
 
 def in_bad_region(el, container) -> bool:
     for parent in el.parents:
@@ -184,7 +192,7 @@ def in_bad_region(el, container) -> bool:
             return True
         classes = " ".join(parent.get("class", []))
         pid = parent.get("id", "") or ""
-        if (classes or pid) and BAD_CLASS_RE.search(f"{classes} {pid}"):
+        if (classes or pid) and BAD_CLASS_RE.search(f"{classes} {pid}
             return True
     return False
 
@@ -298,16 +306,18 @@ def extract_from(container, page_url: str, stats: Counter):
             cap = fig.find("figcaption") if fig else None
             alt = cap.get_text(" ", strip=True) if cap else ""
         good_alt = len(alt) >= 4 and not GENERIC_ALT_RE.match(alt)
+        label = alt if good_alt else pretty_name(url)
         alt_key = norm_text(alt) if good_alt else ""
         file_key = filename_key(url)
         item_no = find_item_no(alt, url)
+        category = detect_category(label)
         dedupe_key = f"no:{item_no}" if item_no else (file_key or alt_key or url)
         if dedupe_key in seen:
             continue
         seen.add(dedupe_key)
-        items.append(Item(url=url, label=alt if good_alt else pretty_name(url),
-                          alt=alt, alt_key=alt_key, file_key=file_key,
-                          us_key=userscript_key(img), item_no=item_no))
+        items.append(Item(url=url, label=label, alt=alt, alt_key=alt_key, 
+                          file_key=file_key, us_key=userscript_key(img), 
+                          item_no=item_no, category=category))
     return items, imgs
 
 def extract_items(post_html: str, page_url: str):
@@ -565,6 +575,12 @@ PAGE_TEMPLATE = """<!doctype html>
     __NEW_BTN__
     <button class="chip" id="clr-toggle" type="button" aria-pressed="false">&#127991;&#65039; Clearance (__CLR_COUNT__)</button>
     <button class="chip" id="week-toggle" type="button" aria-pressed="false">&#9200; Ends this week (0)</button>
+    <button class="chip" data-cat="appliances" type="button" aria-pressed="false">&#129368; Appliances</button>
+    <button class="chip" data-cat="groceries" type="button" aria-pressed="false">&#129382; Groceries</button>
+    <button class="chip" data-cat="household" type="button" aria-pressed="false">&#129532; Household</button>
+    <button class="chip" data-cat="clothing" type="button" aria-pressed="false">&#128084; Clothing</button>
+    <button class="chip" data-cat="health" type="button" aria-pressed="false">&#128138; Health</button>
+    <button class="chip" data-cat="home" type="button" aria-pressed="false">&#128187; Home/Tech</button>
     <button class="chip danger" id="clear-list" type="button" hidden>Clear list</button>
     <div class="cols-toggle">
       <span>Per row</span>
@@ -621,6 +637,7 @@ __CARDS__
   var newBtn = document.getElementById('new-toggle');
   var clrBtn = document.getElementById('clr-toggle');
   var weekBtn = document.getElementById('week-toggle');
+  var catBtns = Array.prototype.slice.call(document.querySelectorAll('[data-cat]'));
   var clearBtn = document.getElementById('clear-list');
   var resetBtn = document.getElementById('reset-btn');
   var shownEl = document.getElementById('shown-count');
@@ -631,7 +648,7 @@ __CARDS__
 
   var shoppingList = load(LIST_KEY, []);
   if (!Array.isArray(shoppingList)) shoppingList = [];
-  var state = { listOnly: false, newOnly: false, clrOnly: false, weekOnly: false };
+  var state = { listOnly: false, newOnly: false, clrOnly: false, weekOnly: false, activeCat: '' };
 
   var now = new Date();
   var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -672,6 +689,7 @@ __CARDS__
                (!state.newOnly || el.classList.contains('is-new')) &&
                (!state.clrOnly || el.classList.contains('is-clr')) &&
                (!state.weekOnly || el.getAttribute('data-week') === '1') &&
+               (!state.activeCat || el.getAttribute('data-cat') === state.activeCat) &&
                (!state.listOnly || inList(el.getAttribute('data-url')));
       el.hidden = !ok;
       if (ok) shown++;
@@ -686,6 +704,13 @@ __CARDS__
     toggles.forEach(function (btn) {
       if (!btn) return;
       var active = (btn === newBtn && state.newOnly) || (btn === clrBtn && state.clrOnly) || (btn === weekBtn && state.weekOnly);
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+
+    catBtns.forEach(function (btn) {
+      var cat = btn.getAttribute('data-cat');
+      var active = (state.activeCat === cat);
       btn.classList.toggle('active', active);
       btn.setAttribute('aria-pressed', active ? 'true' : 'false');
     });
@@ -722,6 +747,15 @@ __CARDS__
   }
   clrBtn.addEventListener('click', function () { state.clrOnly = !state.clrOnly; render(); });
   weekBtn.addEventListener('click', function () { state.weekOnly = !state.weekOnly; render(); });
+  
+  catBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var cat = btn.getAttribute('data-cat');
+      state.activeCat = (state.activeCat === cat) ? '' : cat;
+      render();
+    });
+  });
+
   q.addEventListener('input', render);
 
   resetBtn.addEventListener('click', function () {
@@ -730,6 +764,7 @@ __CARDS__
     state.clrOnly = false;
     state.weekOnly = false;
     state.listOnly = false;
+    state.activeCat = '';
     render();
   });
 
@@ -741,6 +776,7 @@ __CARDS__
     save(LIST_KEY, shoppingList);
     checks.forEach(function (chk) { chk.checked = false; });
     state.listOnly = false;
+    state.activeCat = '';
     render();
   });
 
@@ -799,7 +835,7 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
         if clearance:
             classes.append("is-clr")
 
-        attrs = f'data-t="{esc(i.label.lower(), quote=True)}" data-url="{esc(i.url, quote=True)}"'
+        attrs = f'data-t="{esc(i.label.lower(), quote=True)}" data-url="{esc(i.url, quote=True)}" data-cat="{esc(i.category, quote=True)}"'
         if end:
             attrs += f' data-end="{end}"'
 
@@ -858,7 +894,6 @@ def main() -> int:
 
     store_location = extract_location(monday_html)
 
-    # Determine mode: Weekend mode if weekend_url exists and was successfully discovered
     is_weekend_mode = bool(weekend_url)
     weekend_items = []
     exclusive = []
