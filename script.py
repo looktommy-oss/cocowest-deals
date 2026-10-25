@@ -7,6 +7,7 @@ Env overrides (handy for debugging in Actions):
   MONDAY_URL, WEEKEND_URL     skip homepage discovery
   MONDAY_RE, WEEKEND_RE       regexes used to classify homepage links
   SKIP_DATE_CHECK=1           don't require matching date ranges in the two URLs
+  MATCH_MODE                  "smart" (default) or "userscript" (alt text / src filename only)
   OUTPUT_DIR                  default: public
   DEBUG=1                     dump fetched HTML + JSON next to index.html
 """
@@ -30,6 +31,7 @@ from bs4 import BeautifulSoup
 BASE_URL = "https://www.cocowest.ca/"
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "public"))
 DEBUG = os.getenv("DEBUG") == "1"
+MATCH_MODE = os.getenv("MATCH_MODE", "smart").lower()
 
 # CocoWest titles: "Costco Flyer & Costco Sale Items for October 19-25, 2026 ..."
 #                  "Weekend Update! - Costco Sale Items for October 23-25, 2026 ..."
@@ -152,6 +154,10 @@ BAD_CLASS_RE = re.compile(
 GENERIC_ALT_RE = re.compile(r"^(img|image|photo|picture|screenshot|dsc|pxl|p|untitled)?[\s_-]*\d*$", re.I)
 GENERIC_NAME_RE = re.compile(r"^(img|image|photo|dsc|pxl|screenshot|untitled|p)?\d*$", re.I)
 
+# Costco item numbers: CocoWest alt text looks like "1218587 SWIFFER DUSTERS REFILLS ... $19.99"
+ALT_ITEM_NO_RE = re.compile(r"^\s*(\d{5,8})\b")
+FILE_ITEM_NO_RE = re.compile(r"^(\d{5,8})[-_]")
+
 
 @dataclass
 class Item:
@@ -160,6 +166,8 @@ class Item:
     alt: str
     alt_key: str
     file_key: str
+    us_key: str    # the userscript's identity rule: raw alt, else filename of <img src>
+    item_no: str   # Costco item number if one is found in the alt text / filename, else ""
 
 
 def in_bad_region(el, container) -> bool:
@@ -244,6 +252,23 @@ def pretty_name(url: str) -> str:
     return re.sub(r"[-_]+", " ", name).strip().title()
 
 
+def userscript_key(img) -> str:
+    """Same rule as the Tampermonkey script: img.alt || last path segment of img.src."""
+    alt = img.get("alt") or ""
+    if alt:
+        return alt
+    src = img.get("src") or ""
+    return src.split("?")[0].rsplit("/", 1)[-1]
+
+
+def find_item_no(alt: str, url: str) -> str:
+    m = ALT_ITEM_NO_RE.match(alt or "")
+    if m:
+        return m.group(1)
+    m = FILE_ITEM_NO_RE.match(Path(unquote(urlparse(url).path)).name)
+    return m.group(1) if m else ""
+
+
 def reject_reason(img, url: str, container):
     """Return None if the image should be kept, else a short reason string."""
     u = urlparse(url)
@@ -296,14 +321,17 @@ def extract_from(container, page_url: str, stats: Counter):
 
         alt_key = norm_text(alt) if good_alt else ""
         file_key = filename_key(url)
-        dedupe_key = file_key or alt_key or url
+        item_no = find_item_no(alt, url)
+        dedupe_key = f"no:{item_no}" if item_no else (file_key or alt_key or url)
         if dedupe_key in seen:
             stats["rejected:duplicate"] += 1
             continue
         seen.add(dedupe_key)
 
         items.append(Item(url=url, label=alt if good_alt else pretty_name(url),
-                          alt=alt, alt_key=alt_key, file_key=file_key))
+                          alt=alt, alt_key=alt_key, file_key=file_key,
+                          us_key=userscript_key(img), item_no=item_no))
+    stats["kept_with_item_no"] = sum(1 for i in items if i.item_no)
     return items, imgs
 
 
@@ -340,11 +368,17 @@ def extract_items(post_html: str, page_url: str, name: str = ""):
 # --------------------------------------------------------------- comparison
 
 def find_exclusive(weekend_items, monday_items):
+    """Smart matching.
+    Items with a Costco item number: duplicate if that number (or the exact cleaned filename)
+    appears in the flyer post. Items without one: normalized alt, filename, then fuzzy alt."""
+    mon_nos = {i.item_no for i in monday_items if i.item_no}
     mon_files = {i.file_key for i in monday_items if i.file_key}
     mon_alts = [i.alt_key for i in monday_items if i.alt_key]
     mon_alt_set = set(mon_alts)
 
     def duplicate(it: Item) -> bool:
+        if it.item_no:
+            return it.item_no in mon_nos or (bool(it.file_key) and it.file_key in mon_files)
         if it.file_key and it.file_key in mon_files:
             return True
         if it.alt_key:
@@ -357,6 +391,19 @@ def find_exclusive(weekend_items, monday_items):
         return False
 
     return [i for i in weekend_items if not duplicate(i)]
+
+
+def find_exclusive_userscript(weekend_items, monday_items):
+    """Mirror of the Tampermonkey rule: exact alt (or src filename) not seen on Monday."""
+    mon = {i.us_key for i in monday_items if i.us_key}
+    return [i for i in weekend_items if i.us_key and i.us_key not in mon]
+
+
+def print_samples(tag: str, group, n: int = 12):
+    print(f"--- {tag} sample ({len(group)} total) ---")
+    step = max(1, len(group) // n)
+    for it in group[::step][:n]:
+        print(f"  no={it.item_no or '-':<8} alt={it.alt[:60]!r}  file={Path(urlparse(it.url).path).name}")
 
 
 # ------------------------------------------------------------------- output
@@ -456,8 +503,15 @@ def main() -> int:
         print("ERROR: one of the posts yielded zero images; refusing to deploy.", file=sys.stderr)
         return 1
 
-    exclusive = find_exclusive(weekend_items, monday_items)
-    print(f"{len(exclusive)} exclusive weekend items")
+    smart = find_exclusive(weekend_items, monday_items)
+    us = find_exclusive_userscript(weekend_items, monday_items)
+    print(f"Exclusive items -> smart rules: {len(smart)} | userscript-style rule: {len(us)} "
+          f"| MATCH_MODE={MATCH_MODE}")
+    exclusive = us if MATCH_MODE == "userscript" else smart
+
+    print_samples("flyer", monday_items)
+    print_samples("weekend", weekend_items)
+    print_samples("EXCLUSIVE (used for page)", exclusive)
 
     (OUTPUT_DIR / "index.html").write_text(
         render_html(exclusive, monday_url, weekend_url, len(monday_items), len(weekend_items)),
@@ -466,7 +520,8 @@ def main() -> int:
         (OUTPUT_DIR / "debug_items.json").write_text(json.dumps(
             {"monday": [asdict(i) for i in monday_items],
              "weekend": [asdict(i) for i in weekend_items],
-             "exclusive": [asdict(i) for i in exclusive]}, indent=2), encoding="utf-8")
+             "exclusive_smart": [asdict(i) for i in smart],
+             "exclusive_userscript": [asdict(i) for i in us]}, indent=2), encoding="utf-8")
     return 0
 
 
