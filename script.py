@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Scrape CocoWest.ca for Costco Monday vs Weekend posts, isolate exclusive
-weekend items, and render a static index.html.
+Scrape CocoWest.ca for the weekly Costco flyer post vs the Weekend Update post,
+isolate exclusive weekend items, and render a static index.html.
 
 Env overrides (handy for debugging in Actions):
   MONDAY_URL, WEEKEND_URL     skip homepage discovery
   MONDAY_RE, WEEKEND_RE       regexes used to classify homepage links
+  SKIP_DATE_CHECK=1           don't require matching date ranges in the two URLs
   OUTPUT_DIR                  default: public
   DEBUG=1                     dump fetched HTML + JSON next to index.html
 """
@@ -29,7 +30,9 @@ BASE_URL = "https://www.cocowest.ca/"
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "public"))
 DEBUG = os.getenv("DEBUG") == "1"
 
-MONDAY_RE = re.compile(os.getenv("MONDAY_RE", r"monday"), re.I)
+# CocoWest titles: "Costco Flyer & Costco Sale Items for October 19-25, 2026 ..."
+#                  "Weekend Update! - Costco Sale Items for October 23-25, 2026 ..."
+MONDAY_RE = re.compile(os.getenv("MONDAY_RE", r"flyer"), re.I)
 WEEKEND_RE = re.compile(os.getenv("WEEKEND_RE", r"weekend"), re.I)
 
 FUZZY_THRESHOLD = 0.92
@@ -76,7 +79,8 @@ def fetch(scraper, url: str, retries: int = 4) -> str:
 # ---------------------------------------------------------------- discovery
 
 SKIP_PATH_PREFIXES = ("/category/", "/tag/", "/page/", "/author/", "/wp-", "/feed",
-                      "/comments", "/search", "/about", "/contact", "/privacy")
+                      "/comments", "/search", "/about", "/contact", "/privacy",
+                      "/register", "/terms", "/faq", "/disclaimer")
 
 
 def is_post_link(href: str) -> bool:
@@ -117,9 +121,17 @@ def discover_posts(home_html: str):
     return monday, weekend
 
 
+def end_day(url: str):
+    """'...october-19-25-2026...' -> '25'. Used to check both posts cover the same week."""
+    m = re.search(r"(\d{1,2})-(\d{1,2})-20\d\d", url)
+    return m.group(2) if m else None
+
+
 # ---------------------------------------------------------- image extraction
 
-IMG_URL_RE = re.compile(r"^(https?:)?//\S+?\.(jpe?g|png|webp|gif|avif)(\?\S*)?$|^/\S+?\.(jpe?g|png|webp|gif|avif)(\?\S*)?$", re.I)
+IMG_URL_RE = re.compile(
+    r"^(https?:)?//\S+?\.(jpe?g|png|webp|gif|avif)(\?\S*)?$|^/\S+?\.(jpe?g|png|webp|gif|avif)(\?\S*)?$",
+    re.I)
 KNOWN_LAZY_ATTRS = ("data-src", "data-lazy-src", "data-original", "data-orig-file",
                     "data-large-file", "data-full-url", "data-lazy", "data-img-src")
 SRCSET_ATTRS = ("data-srcset", "data-lazy-srcset", "srcset")
@@ -133,7 +145,6 @@ BAD_HOSTS = ("gravatar.com", "s.w.org", "doubleclick.net", "googlesyndication.co
 BAD_CLASS_RE = re.compile(
     r"(sidebar|widget|comment|related|share|social|author|menu|logo|banner|"
     r"(^|[-_ ])(ads?|advert\w*|sponsor\w*)($|[-_ ])|newsletter|subscribe|breadcrumb)", re.I)
-BAD_TAGS = {"nav", "footer", "aside", "header"}  # only the page-level ones; see in_bad_region
 GENERIC_ALT_RE = re.compile(r"^(img|image|photo|picture|screenshot|dsc|pxl|p|untitled)?[\s_-]*\d*$", re.I)
 GENERIC_NAME_RE = re.compile(r"^(img|image|photo|dsc|pxl|screenshot|untitled|p)?\d*$", re.I)
 
@@ -152,11 +163,13 @@ def in_bad_region(el) -> bool:
         name = getattr(parent, "name", None)
         if name in ("nav", "footer", "aside"):
             return True
-        # page header only: ignore <header> inside <article> (post title/featured image)
+        # page-level header only: ignore <header> inside <article> (post title/featured image)
         if name == "header" and not parent.find_parent("article"):
             return True
-        classes = " ".join(parent.get("class", []) if hasattr(parent, "get") else [])
-        pid = parent.get("id", "") if hasattr(parent, "get") else ""
+        if not hasattr(parent, "get"):
+            continue
+        classes = " ".join(parent.get("class", []))
+        pid = parent.get("id", "") or ""
         if (classes or pid) and BAD_CLASS_RE.search(f"{classes} {pid}"):
             # never exclude the post body itself
             if not re.search(r"(entry-content|post-content|article-content)", classes):
@@ -352,8 +365,8 @@ def render_html(items, monday_url, weekend_url, n_monday, n_weekend) -> str:
 <header>
   <h1>Weekend-exclusive deals ({len(items)})</h1>
   <div class="meta">
-    {n_weekend} weekend items &minus; {n_monday} Monday items &middot; updated {stamp}<br>
-    Sources: <a href="{esc(monday_url, quote=True)}">Monday post</a> &middot;
+    {n_weekend} weekend items &minus; {n_monday} flyer items &middot; updated {stamp}<br>
+    Sources: <a href="{esc(monday_url, quote=True)}">Flyer post</a> &middot;
     <a href="{esc(weekend_url, quote=True)}">Weekend post</a>
   </div>
 </header>
@@ -380,7 +393,15 @@ def main() -> int:
         print(f"ERROR: could not find both posts (monday={monday_url}, weekend={weekend_url}). "
               "Adjust MONDAY_RE / WEEKEND_RE or set MONDAY_URL / WEEKEND_URL.", file=sys.stderr)
         return 1
-    print(f"Monday : {monday_url}\nWeekend: {weekend_url}")
+    print(f"Flyer  : {monday_url}\nWeekend: {weekend_url}")
+
+    # Both posts should cover the same week (e.g. 19-25 and 23-25 both end on the 25th).
+    if os.getenv("SKIP_DATE_CHECK") != "1":
+        a, b = end_day(monday_url), end_day(weekend_url)
+        if a and b and a != b:
+            print("WARNING: date ranges don't line up (this week's weekend post may not be "
+                  "up yet). Exiting without deploying.", file=sys.stderr)
+            return 1
 
     monday_html = fetch(scraper, monday_url)
     time.sleep(random.uniform(1, 3))
@@ -391,7 +412,7 @@ def main() -> int:
 
     monday_items = extract_items(monday_html, monday_url)
     weekend_items = extract_items(weekend_html, weekend_url)
-    print(f"Extracted {len(monday_items)} Monday and {len(weekend_items)} weekend images")
+    print(f"Extracted {len(monday_items)} flyer and {len(weekend_items)} weekend images")
 
     # Safety: an empty result usually means a scrape problem, not "no deals".
     if not monday_items or not weekend_items:
