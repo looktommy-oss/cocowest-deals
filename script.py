@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Scrape CocoWest.ca for Costco posts with automatic category tagging and filtering,
+Scrape CocoWest.ca for Costco posts with comprehensive category tagging and filtering,
 smart date-aware post discovery, shopping list, store location, clearance tags, and end dates.
 
 Env overrides:
@@ -163,13 +163,15 @@ class Item:
     item_no: str
     category: str
 
+# Separate electronics from home, plus expanded keyword definitions
 CATEGORY_RULES = {
-    "appliances": re.compile(r"\b(toaster|blender|coffee|espresso|air\s*fryer|microwave|mixer|cookware|pan|pot|kettle|vacuum|shaver|toothbrush|fan|heater)\b", re.I),
-    "groceries": re.compile(r"\b(coffee\s*bean|protein|snack|meat|chicken|beef|salmon|shrimp|juice|water|milk|cheese|chips|chocolate|cookie|bar|almond|rice|pasta|sauce|soup|oil|dressing)\b", re.I),
-    "household": re.compile(r"\b(paper\s*towel|toilet\s*paper|tissues?|detergent|dish\s*soap|trash\s*bags?|garbage\s*bags?|foil|ziploc|sponge|cleaner|batteries)\b", re.I),
-    "clothing": re.compile(r"\b(pants?|jeans|hoodie|sweatshirt|socks?|jacket|coat|shirt|shorts?|sweater|underwear|shoes?|boots?|slippers?|gloves?|hat)\b", re.I),
-    "health": re.compile(r"\b(vitamin|supplement|protein\s*powder|shampoo|conditioner|lotion|soap|toothpaste|pain\s*relief|advil|tylenol|multivitamin|collagen)\b", re.I),
-    "home": re.compile(r"\b(pillow|sheet|blanket|duvet|towel|mat|hanger|storage|bin|basket|lamp|bulb|tv|monitor|speaker|headphone|charger|cable)\b", re.I),
+    "appliances": re.compile(r"\b(toaster|blender|coffee|espresso|air\s*fryer|microwave|mixer|cookware|pan|pot|kettle|vacuum|shaver|toothbrush|fan|heater|grill|cooker|fridge|freezer|iron|steamer)\b", re.I),
+    "electronics": re.compile(r"\b(tv|television|monitor|speaker|headphone|earbud|soundbar|sound\s*bar|laptop|tablet|phone|charger|cable|battery|batteries|router|camera|smart\s*watch)\b", re.I),
+    "groceries": re.compile(r"\b(coffee|protein|snack|meat|chicken|beef|pork|salmon|shrimp|bacon|sausage|juice|water|milk|cheese|chips|chocolate|cookie|bar|almond|rice|pasta|sauce|soup|oil|dressing|bread|cereal|yogurt|fruit|vegetable|salad|pizza|dumpling|egg|butter|nuts|honey|syrup|tea|wine|beer|spirits)\b", re.I),
+    "household": re.compile(r"\b(paper\s*towel|toilet\s*paper|tissues?|detergent|dish\s*soap|trash\s*bags?|garbage\s*bags?|foil|ziploc|sponge|cleaner|light\s*bulb|napkins?|wipes?|laundry|fabric\s*softener)\b", re.I),
+    "clothing": re.compile(r"\b(pants?|jeans|hoodie|sweatshirt|socks?|jacket|coat|shirt|shorts?|sweater|underwear|shoes?|boots?|slippers?|gloves?|hat|leggings?|t-shirt|belt|pyjamas?)\b", re.I),
+    "health": re.compile(r"\b(vitamin|supplement|protein\s*powder|shampoo|conditioner|lotion|soap|toothpaste|pain\s*relief|advil|tylenol|multivitamin|collagen|mouthwash|deodorant|razor|sunscreen|eye\s*drops?)\b", re.I),
+    "home": re.compile(r"\b(pillow|sheet|blanket|duvet|towel|mat|hanger|storage|bin|basket|lamp|rug|mattress|curtain|candle|diffuser|desk|chair)\b", re.I),
 }
 
 def detect_category(label: str) -> str:
@@ -503,7 +505,8 @@ PAGE_TEMPLATE = """<!doctype html>
                   background:var(--card); color:var(--fg); }
   .toolbar { max-width:1200px; margin:0 auto; padding:0 .8rem .6rem; display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; }
   .chip { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:999px; padding:.3rem .75rem;
-          font-size:.85rem; font-weight:600; cursor:pointer; }
+          font-size:.85rem; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; }
+  .chip.icon-only { padding:.3rem .55rem; font-size:1rem; }
   .chip.active { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
   .chip.danger { color:var(--danger); border-color:var(--danger); }
   .cols-toggle { display:none; align-items:center; gap:.35rem; margin-left:auto; font-size:.8rem; color:var(--muted); }
@@ -574,12 +577,13 @@ PAGE_TEMPLATE = """<!doctype html>
     __NEW_BTN__
     <button class="chip" id="clr-toggle" type="button" aria-pressed="false">&#127991;&#65039; Clearance (__CLR_COUNT__)</button>
     <button class="chip" id="week-toggle" type="button" aria-pressed="false">&#9200; Ends this week (0)</button>
-    <button class="chip" data-cat="appliances" type="button" aria-pressed="false">&#129368; Appliances</button>
-    <button class="chip" data-cat="groceries" type="button" aria-pressed="false">&#129382; Groceries</button>
-    <button class="chip" data-cat="household" type="button" aria-pressed="false">&#129532; Household</button>
-    <button class="chip" data-cat="clothing" type="button" aria-pressed="false">&#128084; Clothing</button>
-    <button class="chip" data-cat="health" type="button" aria-pressed="false">&#128138; Health</button>
-    <button class="chip" data-cat="home" type="button" aria-pressed="false">&#128187; Home/Tech</button>
+    <button class="chip icon-only" data-cat="appliances" type="button" aria-pressed="false" title="Appliances">&#129368;</button>
+    <button class="chip icon-only" data-cat="electronics" type="button" aria-pressed="false" title="Electronics">&#128187;</button>
+    <button class="chip icon-only" data-cat="groceries" type="button" aria-pressed="false" title="Groceries">&#129382;</button>
+    <button class="chip icon-only" data-cat="household" type="button" aria-pressed="false" title="Household">&#129532;</button>
+    <button class="chip icon-only" data-cat="clothing" type="button" aria-pressed="false" title="Clothing">&#128084;</button>
+    <button class="chip icon-only" data-cat="health" type="button" aria-pressed="false" title="Health">&#128138;</button>
+    <button class="chip icon-only" data-cat="home" type="button" aria-pressed="false" title="Home">&#129692;</button>
     <button class="chip danger" id="clear-list" type="button" hidden>Clear list</button>
     <div class="cols-toggle">
       <span>Per row</span>
