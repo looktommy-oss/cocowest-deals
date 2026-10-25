@@ -7,7 +7,6 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 def get_post_items(url):
-    # Use cloudscraper to bypass Cloudflare anti-bot protection
     scraper = cloudscraper.create_scraper(
         browser={
             'browser': 'chrome',
@@ -30,19 +29,20 @@ def get_post_items(url):
         for img in images:
             alt = (img.get('alt') or '').strip()
             
+            # Check lazy-load attributes FIRST, before fallback src placeholders
             src = (
-                img.get('src') or 
                 img.get('data-src') or 
                 img.get('data-lazy-src') or 
-                img.get('data-orig-file') or ''
+                img.get('data-orig-file') or 
+                img.get('src') or ''
             )
             
-            if not src and img.get('srcset'):
-                src = img.get('srcset').split(',')[0].split(' ')[0]
-            if not src and img.get('data-srcset'):
-                src = img.get('data-srcset').split(',')[0].split(' ')[0]
+            if not src or 'data:image' in src:
+                srcset = img.get('srcset') or img.get('data-srcset') or ''
+                if srcset:
+                    src = srcset.split(',')[0].split(' ')[0]
 
-            if src and ('uploads' in src or 'wp-content' in src):
+            if src and 'data:image' not in src:
                 filename = src.split('/')[-1].split('?')[0]
                 identifier = alt if alt else filename
                 
@@ -53,14 +53,15 @@ def get_post_items(url):
                         'alt': alt or 'Costco Deal'
                     })
 
-        # Regex fallback for lazy-loaded image sources
-        if not items:
+        # Regex fallback to catch any remaining image links
+        if len(items) < 5:
             raw_urls = re.findall(r'https?://[^\s"\']+\.(?:jpg|jpeg|png|webp)', resp.text)
             for raw in raw_urls:
                 if 'uploads' in raw or 'wp-content' in raw:
                     fname = raw.split('/')[-1].split('?')[0]
                     if not any(k in fname.lower() for k in ['logo', 'avatar', 'gravatar', 'header', 'banner', 'icon', 'badge']):
-                        items.append({'id': fname, 'src': raw, 'alt': 'Costco Deal'})
+                        if not any(item['src'] == raw for item in items):
+                            items.append({'id': fname, 'src': raw, 'alt': 'Costco Deal'})
 
         return items
     except Exception as e:
