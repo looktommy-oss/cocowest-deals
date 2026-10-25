@@ -16,88 +16,70 @@ def get_post_items(url):
     )
     try:
         resp = scraper.get(url, timeout=20)
+        print(f"Fetching {url} -> Status: {resp.status_code}, Length: {len(resp.text)} bytes")
         if resp.status_code != 200:
-            print(f"Failed to fetch {url}, status: {resp.status_code}")
             return []
         
         soup = BeautifulSoup(resp.text, 'html.parser')
-        content = soup.find('div', class_=re.compile(r'entry-content|post-content')) or soup.find('article') or soup
+        
+        # Let's check all img tags on the entire page
+        all_imgs = soup.find_all('img')
+        print(f"Total <img> tags found on page: {len(all_imgs)}")
         
         items = []
-        images = content.find_all('img')
-        
-        for img in images:
+        seen_urls = set()
+
+        for i, img in enumerate(all_imgs):
             alt = (img.get('alt') or '').strip()
-            
-            # Check lazy-load attributes FIRST, before fallback src placeholders
             src = (
                 img.get('data-src') or 
                 img.get('data-lazy-src') or 
                 img.get('data-orig-file') or 
                 img.get('src') or ''
             )
-            
             if not src or 'data:image' in src:
                 srcset = img.get('srcset') or img.get('data-srcset') or ''
                 if srcset:
                     src = srcset.split(',')[0].split(' ')[0]
 
-            if src and 'data:image' not in src:
-                filename = src.split('/')[-1].split('?')[0]
-                identifier = alt if alt else filename
+            if not src:
+                continue
+
+            clean_src = src.split('?')[0]
+            filename = clean_src.split('/')[-1].lower()
+
+            # Print first 5 images to inspect their structure
+            if i < 5:
+                print(f"  [Img {i}] src: {clean_src} | alt: {alt}")
+
+            if ('uploads' in clean_src or 'wp-content' in clean_src) and not clean_src.endswith('.svg'):
+                # Check filter keywords
+                rejected_keywords = ['logo', 'avatar', 'gravatar', 'header', 'banner', 'icon', 'badge', 'social', 'button']
+                matched_keyword = next((k for k in rejected_keywords if k in filename), None)
                 
-                if identifier and not any(k in identifier.lower() for k in ['logo', 'avatar', 'gravatar', 'header', 'banner', 'icon', 'badge']):
+                if matched_keyword:
+                    # print(f"    -> Rejected by keyword '{matched_keyword}': {filename}")
+                    continue
+
+                if clean_src not in seen_urls:
+                    seen_urls.add(clean_src)
                     items.append({
-                        'id': identifier,
-                        'src': src,
+                        'id': alt if alt else filename,
+                        'src': clean_src,
                         'alt': alt or 'Costco Deal'
                     })
 
-        # Regex fallback to catch any remaining image links
-        if len(items) < 5:
-            raw_urls = re.findall(r'https?://[^\s"\']+\.(?:jpg|jpeg|png|webp)', resp.text)
-            for raw in raw_urls:
-                if 'uploads' in raw or 'wp-content' in raw:
-                    fname = raw.split('/')[-1].split('?')[0]
-                    if not any(k in fname.lower() for k in ['logo', 'avatar', 'gravatar', 'header', 'banner', 'icon', 'badge']):
-                        if not any(item['src'] == raw for item in items):
-                            items.append({'id': fname, 'src': raw, 'alt': 'Costco Deal'})
-
+        print(f"Successfully extracted {len(items)} valid deal images after filtering.")
         return items
     except Exception as e:
         print(f"Error fetching {url}: {e}")
         return []
 
 def main():
-    print("Fetching CocoWest homepage using cloudscraper...")
     scraper = cloudscraper.create_scraper()
     
-    monday_url = None
-    weekend_url = None
-    
-    try:
-        home_resp = scraper.get('https://cocowest.ca/', timeout=20)
-        home_soup = BeautifulSoup(home_resp.text, 'html.parser')
-        
-        for a in home_soup.find_all('a', href=True):
-            text = (a.get_text() or '').lower()
-            href = (a['href'] or '').lower()
-            
-            if ('sale items for' in text or 'monday' in text or 'sale-items-for' in href or 'costco-flyer' in href) \
-               and 'weekend' not in text and 'weekend' not in href and 'fan-blog' not in text:
-                if not monday_url:
-                    monday_url = a['href']
-            elif 'weekend' in text or 'weekend' in href:
-                if not weekend_url:
-                    weekend_url = a['href']
-    except Exception as e:
-        print(f"Homepage fetch failed: {e}")
-
-    # Fallbacks for current active post URLs
-    if not monday_url:
-        monday_url = "https://cocowest.ca/2026/10/costco-flyer-costco-sale-items-for-october-19-25-2026-2026-for-bc-ab-sk-mb/"
-    if not weekend_url:
-        weekend_url = "https://cocowest.ca/2026/10/weekend-update-costco-sale-items-for-october-23-25-2026-for-bc-ab-mb-sk/"
+    monday_url = "https://cocowest.ca/2026/10/costco-flyer-costco-sale-items-for-october-19-25-2026-2026-for-bc-ab-sk-mb/"
+    weekend_url = "https://cocowest.ca/2026/10/weekend-update-costco-sale-items-for-october-23-25-2026-for-bc-ab-mb-sk/"
 
     print(f"Target Monday Post:  {monday_url}")
     print(f"Target Weekend Post: {weekend_url}")
@@ -105,12 +87,8 @@ def main():
     monday_data = get_post_items(monday_url)
     weekend_data = get_post_items(weekend_url)
 
-    print(f"Extracted {len(monday_data)} images from Monday post.")
-    print(f"Extracted {len(weekend_data)} images from Weekend post.")
-
     monday_ids = {item['id'] for item in monday_data}
 
-    # Filter out items present on Monday
     new_deals = []
     seen = set()
     for item in weekend_data:
@@ -158,26 +136,6 @@ def main():
         f.write(html_page)
 
     print("Successfully created index.html!")
-
-    # Optional Email Digest
-    sender_email = os.environ.get("MAIL_USERNAME")
-    receiver_email = os.environ.get("MAIL_TO")
-    app_password = os.environ.get("MAIL_PASSWORD")
-
-    if sender_email and receiver_email and app_password:
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = f"🛒 {len(new_deals)} New CocoWest Weekend Deals!"
-        msg['From'] = sender_email
-        msg['To'] = receiver_email
-        msg.attach(MIMEText(html_page, 'html'))
-
-        try:
-            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-                server.login(sender_email, app_password)
-                server.sendmail(sender_email, receiver_email, msg.as_string())
-            print("Successfully sent email digest!")
-        except Exception as e:
-            print(f"Failed to send email: {e}")
 
 if __name__ == '__main__':
     main()
