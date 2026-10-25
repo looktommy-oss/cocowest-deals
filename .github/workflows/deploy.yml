@@ -2,7 +2,6 @@ name: Update CocoWest New Deals
 
 on:
   schedule:
-    # Runs every Friday and Saturday at 5:00 PM UTC
     - cron: '0 17 * * 5,6'
   workflow_dispatch:
 
@@ -35,4 +34,6 @@ jobs:
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./
+          publish_dir: .
+          publish_branch: gh-pages
+          force_orphan: true
