@@ -2,7 +2,8 @@
 """
 Scrape CocoWest.ca for the weekly Costco flyer post vs the Weekend Update post,
 display ALL weekend items with exclusive ones highlighted, include an interactive
-shopping list, and email you when a NEW weekend post shows up.
+shopping list, flag .97 clearance prices and end dates, and email you when a NEW
+weekend post shows up.
 
 Env overrides:
   MONDAY_URL, WEEKEND_URL      skip homepage discovery
@@ -342,6 +343,38 @@ def find_exclusive_userscript(weekend_items, monday_items):
     return [i for i in weekend_items if i.us_key and i.us_key not in mon]
 
 
+# ------------------------------------------------- price + end-date parsing
+
+# Captions look like:
+#   "1896304 KITCHENAID OVEN MITT SET 4 PIECES ($5.00 INSTANT SAVINGS EXPIRES ON 2026-10-25) $19.99"
+PRICE_RE = re.compile(r"\$\s?(\d[\d,]*)\.(\d{2})\b")
+END_RE = re.compile(
+    r"(?:EXPIRES|ENDS|VALID\s+(?:UNTIL|THROUGH|THRU))\s+(?:ON\s+)?(\d{4}-\d{2}-\d{2})", re.I)
+
+def parse_price(label: str):
+    """Final shelf price as (dollars, cents) strings, or None.
+    Amounts inside parentheses (the instant-savings amount) are ignored."""
+    text = re.sub(r"\([^)]*\)", " ", label or "")
+    found = PRICE_RE.findall(text)
+    return found[-1] if found else None
+
+def is_clearance(label: str) -> bool:
+    """Prices ending in .97 are treated as clearance."""
+    p = parse_price(label)
+    return bool(p) and p[1] == "97"
+
+def parse_end_date(label: str) -> str:
+    """'... EXPIRES ON 2026-10-25 ...' -> '2026-10-25' (validated), else ''."""
+    m = END_RE.search(label or "")
+    if not m:
+        return ""
+    try:
+        datetime.strptime(m.group(1), "%Y-%m-%d")
+    except ValueError:
+        return ""
+    return m.group(1)
+
+
 # --------------------------------------------------------- state + alerting
 
 def load_previous_state(scraper):
@@ -457,7 +490,7 @@ PAGE_TEMPLATE = """<!doctype html>
   .search { max-width:1200px; margin:.5rem auto 0; display:flex; gap:.5rem; }
   .search input { flex:1; min-width:0; padding:.6rem .8rem; font-size:16px; border:1px solid var(--line); border-radius:10px;
                   background:var(--card); color:var(--fg); }
-  .toolbar { max-width:1200px; margin:.5rem auto 0; display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; }
+  .toolbar { max-width:1200px; margin:.6rem auto 0; padding:0 .8rem; display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; }
   .chip { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:999px; padding:.3rem .75rem;
           font-size:.85rem; font-weight:600; cursor:pointer; }
   .chip.active { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
@@ -466,29 +499,43 @@ PAGE_TEMPLATE = """<!doctype html>
   .seg { display:inline-flex; border:1px solid var(--line); border-radius:999px; overflow:hidden; }
   .seg button { border:none; background:var(--card); color:var(--fg); padding:.3rem .7rem; font-size:.85rem; font-weight:700; cursor:pointer; }
   .seg button.active { background:var(--accent); color:var(--on-accent); }
-  .meta { max-width:1200px; margin:.6rem auto .2rem; padding:0 .8rem; color:var(--muted); font-size:.8rem; line-height:1.4; }
+  .meta { max-width:1200px; margin:.6rem auto .2rem; padding:0 .8rem; color:var(--muted); font-size:.8rem; line-height:1.5; }
   .meta a { color:inherit; }
   .grid { max-width:1200px; margin:.6rem auto; padding:0 .8rem; display:grid; gap:.8rem; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); }
   .card { margin:0; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; position:relative;
           display:flex; flex-direction:column; justify-content:space-between; }
   .card.is-new { border:2px solid var(--highlight-border); background:var(--highlight); }
+  .card.is-expired img, .card.is-expired figcaption { opacity:.5; }
   .new-tag { position:absolute; top:8px; left:8px; background:#28a745; color:#fff; font-size:.7rem; font-weight:bold; padding:2px 6px;
              border-radius:4px; z-index:2; text-transform:uppercase; }
+  .clr-tag { position:absolute; top:8px; right:8px; background:#6f42c1; color:#fff; font-size:.7rem; font-weight:bold; padding:2px 6px;
+             border-radius:4px; z-index:2; }
   .card a { display:block; }
   .card img { width:100%; aspect-ratio:1/1; object-fit:contain; display:block; background:#fff; }
   .card figcaption { padding:.5rem .6rem; font-size:.85rem; line-height:1.3; flex-grow:1; overflow-wrap:anywhere; }
-  .card-footer { padding:.4rem .6rem .6rem; display:flex; align-items:center; justify-content:space-between; border-top:1px solid var(--line); font-size:.8rem; }
+  .card-footer { padding:.4rem .6rem .6rem; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.3rem;
+                 border-top:1px solid var(--line); font-size:.8rem; }
   .shop-label { display:flex; align-items:center; gap:.4rem; cursor:pointer; font-weight:500; }
   .shop-label input { width:1.1rem; height:1.1rem; accent-color:var(--accent); cursor:pointer; }
+  .end-badge { font-size:.72rem; font-weight:700; padding:2px 8px; border-radius:999px; white-space:nowrap; }
+  .end-badge.today { background:#dc3545; color:#fff; }
+  .end-badge.tomorrow { background:#fd7e14; color:#fff; }
+  .end-badge.week { background:#ffc107; color:#1a1a1a; }
+  .end-badge.later { background:transparent; color:var(--muted); border:1px solid var(--line); font-weight:600; }
+  .end-badge.expired { background:var(--line); color:var(--muted); text-decoration:line-through; }
   .empty { padding:2rem 1rem; text-align:center; color:var(--muted); grid-column:1/-1; }
   @media (max-width:640px) {
     .cols-toggle { display:flex; }
+    .toolbar { padding:0 .6rem; }
     .grid { padding:0 .5rem; gap:.5rem; grid-template-columns:minmax(0,1fr); }
     .grid.c2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .grid.c2 .card { border-radius:10px; }
     .grid.c2 .card figcaption { font-size:.72rem; padding:.4rem .45rem; }
     .grid.c2 .card-footer { padding:.35rem .45rem .5rem; font-size:.72rem; }
-    .grid.c2 .new-tag { font-size:.6rem; top:5px; left:5px; }
+    .grid.c2 .new-tag, .grid.c2 .clr-tag { font-size:.6rem; top:5px; }
+    .grid.c2 .new-tag { left:5px; }
+    .grid.c2 .clr-tag { right:5px; }
+    .grid.c2 .end-badge { font-size:.65rem; padding:2px 6px; }
     .title { font-size:.95rem; }
     .meta { padding:0 .6rem; }
   }
@@ -504,20 +551,23 @@ PAGE_TEMPLATE = """<!doctype html>
     <input id="q" type="search" placeholder="Filter by name or item number..." autocomplete="off">
     <button class="badge-btn gray" id="reset-btn" type="button">Reset</button>
   </div>
-  <div class="toolbar">
-    <button class="chip" id="new-toggle" type="button" aria-pressed="false">&#10024; New only (__NEW_COUNT__)</button>
-    <button class="chip danger" id="clear-list" type="button" hidden>Clear list</button>
-    <div class="cols-toggle">
-      <span>Per row</span>
-      <span class="seg">
-        <button type="button" data-cols="1" aria-pressed="false">1</button>
-        <button type="button" data-cols="2" aria-pressed="true">2</button>
-      </span>
-    </div>
-  </div>
 </header>
+<div class="toolbar">
+  <button class="chip" id="new-toggle" type="button" aria-pressed="false">&#10024; New only (__NEW_COUNT__)</button>
+  <button class="chip" id="clr-toggle" type="button" aria-pressed="false">&#127991;&#65039; .97 clearance (__CLR_COUNT__)</button>
+  <button class="chip" id="week-toggle" type="button" aria-pressed="false">&#9200; Ends this week (0)</button>
+  <button class="chip danger" id="clear-list" type="button" hidden>Clear list</button>
+  <div class="cols-toggle">
+    <span>Per row</span>
+    <span class="seg">
+      <button type="button" data-cols="1" aria-pressed="false">1</button>
+      <button type="button" data-cols="2" aria-pressed="true">2</button>
+    </span>
+  </div>
+</div>
 <div class="meta">
   Showing <b id="shown-count">__TOTAL__</b> of <b>__TOTAL__</b> weekend items (<b>__NEW_COUNT__</b> new exclusives highlighted) &middot; updated __STAMP__<br>
+  &#127991;&#65039; .97 price = clearance &middot; end-date badges are measured from today (Costco weeks run Mon&ndash;Sun)<br>
   Sources: <a href="__FLYER_URL__">Monday Flyer</a> &middot; <a href="__WEEKEND_URL__">Weekend Update</a>
 </div>
 <main class="grid c2" id="grid">
@@ -528,6 +578,8 @@ __CARDS__
 (function () {
   var LIST_KEY = 'cocowest_shopping_list';
   var COLS_KEY = 'cocowest_cols';
+  var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  var DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
   function load(key, fallback) {
     try {
@@ -539,10 +591,28 @@ __CARDS__
     try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
   }
 
+  // BEGIN classify
+  // "Ends this week" = ends between today and this coming Sunday (Costco weeks run Mon-Sun).
+  function classifyEnd(s, today) {
+    var p = s.split('-');
+    var end = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+    var left = Math.round((end - today) / 86400000);
+    var daysToSunday = (7 - today.getDay()) % 7;
+    var short = MONTHS[end.getMonth()] + ' ' + end.getDate();
+    if (left < 0) return { cls: 'expired', text: 'Expired ' + short, inWeek: false, expired: true };
+    if (left > daysToSunday) return { cls: 'later', text: 'Ends ' + short, inWeek: false, expired: false };
+    if (left === 0) return { cls: 'today', text: 'Ends today', inWeek: true, expired: false };
+    if (left === 1) return { cls: 'tomorrow', text: 'Ends tomorrow', inWeek: true, expired: false };
+    return { cls: 'week', text: 'Ends ' + DAYS[end.getDay()], inWeek: true, expired: false };
+  }
+  // END classify
+
   var q = document.getElementById('q');
   var grid = document.getElementById('grid');
   var listBtn = document.getElementById('list-toggle');
   var newBtn = document.getElementById('new-toggle');
+  var clrBtn = document.getElementById('clr-toggle');
+  var weekBtn = document.getElementById('week-toggle');
   var clearBtn = document.getElementById('clear-list');
   var resetBtn = document.getElementById('reset-btn');
   var shownEl = document.getElementById('shown-count');
@@ -553,15 +623,37 @@ __CARDS__
 
   var shoppingList = load(LIST_KEY, []);
   if (!Array.isArray(shoppingList)) shoppingList = [];
-  var state = { listOnly: false, newOnly: false };
+  var state = { listOnly: false, newOnly: false, clrOnly: false, weekOnly: false };
+
+  // End-date badges, measured against the viewer's current date
+  var now = new Date();
+  var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  cards.forEach(function (el) {
+    var s = el.getAttribute('data-end');
+    var badge = el.querySelector('.end-badge');
+    if (!s || !badge) return;
+    var r = classifyEnd(s, today);
+    badge.className = 'end-badge ' + r.cls;
+    badge.textContent = r.text;
+    badge.hidden = false;
+    if (r.expired) el.classList.add('is-expired');
+    if (r.inWeek) el.setAttribute('data-week', '1');
+  });
+
+  function countWhere(fn) {
+    var n = 0;
+    cards.forEach(function (el) { if (fn(el)) n++; });
+    return n;
+  }
+  newBtn.innerHTML = '&#10024; New only (' + countWhere(function (el) { return el.classList.contains('is-new'); }) + ')';
+  clrBtn.innerHTML = '&#127991;&#65039; .97 clearance (' + countWhere(function (el) { return el.classList.contains('is-clr'); }) + ')';
+  weekBtn.innerHTML = '&#9200; Ends this week (' + countWhere(function (el) { return el.getAttribute('data-week') === '1'; }) + ')';
 
   function inList(url) { return shoppingList.indexOf(url) !== -1; }
 
   // Only count list entries that are on this page (older weeks' entries stay invisible).
   function listCountOnPage() {
-    var n = 0;
-    cards.forEach(function (el) { if (inList(el.getAttribute('data-url'))) n++; });
-    return n;
+    return countWhere(function (el) { return inList(el.getAttribute('data-url')); });
   }
 
   function render() {
@@ -570,6 +662,8 @@ __CARDS__
     cards.forEach(function (el) {
       var ok = (!t || el.getAttribute('data-t').indexOf(t) !== -1) &&
                (!state.newOnly || el.classList.contains('is-new')) &&
+               (!state.clrOnly || el.classList.contains('is-clr')) &&
+               (!state.weekOnly || el.getAttribute('data-week') === '1') &&
                (!state.listOnly || inList(el.getAttribute('data-url')));
       el.hidden = !ok;
       if (ok) shown++;
@@ -578,8 +672,10 @@ __CARDS__
     var n = listCountOnPage();
     listBtn.innerHTML = state.listOnly ? 'Show all items' : '&#128722; List (' + n + ')';
     listBtn.classList.toggle('active', state.listOnly);
-    newBtn.classList.toggle('active', state.newOnly);
-    newBtn.setAttribute('aria-pressed', state.newOnly ? 'true' : 'false');
+    [[newBtn, state.newOnly], [clrBtn, state.clrOnly], [weekBtn, state.weekOnly]].forEach(function (pair) {
+      pair[0].classList.toggle('active', pair[1]);
+      pair[0].setAttribute('aria-pressed', pair[1] ? 'true' : 'false');
+    });
     clearBtn.hidden = n === 0;
     clearBtn.textContent = 'Clear list (' + n + ')';
     shownEl.textContent = shown;
@@ -609,12 +705,16 @@ __CARDS__
 
   listBtn.addEventListener('click', function () { state.listOnly = !state.listOnly; render(); });
   newBtn.addEventListener('click', function () { state.newOnly = !state.newOnly; render(); });
+  clrBtn.addEventListener('click', function () { state.clrOnly = !state.clrOnly; render(); });
+  weekBtn.addEventListener('click', function () { state.weekOnly = !state.weekOnly; render(); });
   q.addEventListener('input', render);
 
-  // Reset = clear search + New-only + list view (does NOT touch your saved list)
+  // Reset = clear search + all filters + list view (does NOT touch your saved list)
   resetBtn.addEventListener('click', function () {
     q.value = '';
     state.newOnly = false;
+    state.clrOnly = false;
+    state.weekOnly = false;
     state.listOnly = false;
     render();
   });
@@ -658,16 +758,30 @@ def render_html(weekend_items, exclusive_urls, monday_url, weekend_url, n_monday
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     esc = html.escape
     new_count = len(exclusive_urls)
+    clr_count = sum(1 for i in weekend_items if is_clearance(i.label))
 
     cards = []
     for i in weekend_items:
         is_new = i.url in exclusive_urls
-        card_class = "card is-new" if is_new else "card"
-        badge = '<div class="new-tag">&#10024; New</div>' if is_new else ''
-        label_lower = esc(i.label.lower(), quote=True)
+        clearance = is_clearance(i.label)
+        end = parse_end_date(i.label)
 
-        cards.append(f'''<figure class="{card_class}" data-t="{label_lower}" data-url="{esc(i.url, quote=True)}">
-  {badge}
+        classes = ["card"]
+        if is_new:
+            classes.append("is-new")
+        if clearance:
+            classes.append("is-clr")
+
+        attrs = f'data-t="{esc(i.label.lower(), quote=True)}" data-url="{esc(i.url, quote=True)}"'
+        if end:
+            attrs += f' data-end="{end}"'
+
+        new_tag = '<div class="new-tag">&#10024; New</div>' if is_new else ''
+        clr_tag = '<div class="clr-tag">&#127991;&#65039; .97</div>' if clearance else ''
+        end_badge = '<span class="end-badge" hidden></span>' if end else ''
+
+        cards.append(f'''<figure class="{' '.join(classes)}" {attrs}>
+  {new_tag}{clr_tag}
   <a href="{esc(i.url, quote=True)}" target="_blank" rel="noopener">
     <img src="{esc(i.url, quote=True)}" alt="{esc(i.label, quote=True)}" loading="lazy" referrerpolicy="no-referrer">
   </a>
@@ -676,6 +790,7 @@ def render_html(weekend_items, exclusive_urls, monday_url, weekend_url, n_monday
     <label class="shop-label">
       <input type="checkbox" class="shop-check" data-url="{esc(i.url, quote=True)}"> Add to list
     </label>
+    {end_badge}
   </div>
 </figure>''')
 
@@ -684,6 +799,7 @@ def render_html(weekend_items, exclusive_urls, monday_url, weekend_url, n_monday
     return (PAGE_TEMPLATE
             .replace("__TOTAL__", str(len(weekend_items)))
             .replace("__NEW_COUNT__", str(new_count))
+            .replace("__CLR_COUNT__", str(clr_count))
             .replace("__STAMP__", stamp)
             .replace("__FLYER_URL__", esc(monday_url, quote=True))
             .replace("__WEEKEND_URL__", esc(weekend_url, quote=True))
@@ -717,6 +833,11 @@ def main() -> int:
     exclusive_urls = {i.url for i in exclusive}
 
     print(f"Total weekend items: {len(weekend_items)} | New exclusives highlighted: {len(exclusive_urls)}")
+    n_priced = sum(1 for i in weekend_items if parse_price(i.label))
+    n_clr = sum(1 for i in weekend_items if is_clearance(i.label))
+    n_dated = sum(1 for i in weekend_items if parse_end_date(i.label))
+    print(f"Prices found: {n_priced}/{len(weekend_items)} | .97 clearance: {n_clr} | "
+          f"end dates found: {n_dated}/{len(weekend_items)}")
 
     # Read the previously deployed state BEFORE we publish a new one.
     prev_state, state_ok = load_previous_state(scraper)
