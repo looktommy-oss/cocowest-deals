@@ -1,4 +1,4 @@
-#!/usr/init/env python3
+#!/usr/bin/env python3
 """
 Scrape CocoWest.ca for Costco posts with automatic category tagging and filtering,
 smart date-aware post discovery, shopping list, store location, clearance tags, and end dates.
@@ -163,8 +163,7 @@ class Item:
     item_no: str
     category: str
 
-# Category keyword mapping rules
- CATEGORY_RULES = {
+CATEGORY_RULES = {
     "appliances": re.compile(r"\b(toaster|blender|coffee|espresso|air\s*fryer|microwave|mixer|cookware|pan|pot|kettle|vacuum|shaver|toothbrush|fan|heater)\b", re.I),
     "groceries": re.compile(r"\b(coffee\s*bean|protein|snack|meat|chicken|beef|salmon|shrimp|juice|water|milk|cheese|chips|chocolate|cookie|bar|almond|rice|pasta|sauce|soup|oil|dressing)\b", re.I),
     "household": re.compile(r"\b(paper\s*towel|toilet\s*paper|tissues?|detergent|dish\s*soap|trash\s*bags?|garbage\s*bags?|foil|ziploc|sponge|cleaner|batteries)\b", re.I),
@@ -192,7 +191,7 @@ def in_bad_region(el, container) -> bool:
             return True
         classes = " ".join(parent.get("class", []))
         pid = parent.get("id", "") or ""
-        if (classes or pid) and BAD_CLASS_RE.search(f"{classes} {pid}
+        if (classes or pid) and BAD_CLASS_RE.search(f"{classes} {pid}"):
             return True
     return False
 
