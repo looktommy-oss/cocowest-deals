@@ -531,193 +531,197 @@ __CARDS__
 </main>
 <script>
 (function () {
-  var LIST_KEY = 'cocowest_shopping_list';
-  var COLS_KEY = 'cocowest_cols';
-  var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  var DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  try {
+    var LIST_KEY = 'cocowest_shopping_list';
+    var COLS_KEY = 'cocowest_cols';
+    var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    var DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-  function load(key, fallback) {
-    try {
-      var raw = localStorage.getItem(key);
-      return raw === null ? fallback : JSON.parse(raw);
-    } catch (e) { return fallback; }
-  }
-  function save(key, value) {
-    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
-  }
-
-  function classifyEnd(s, today) {
-    var p = s.split('-');
-    var end = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
-    var left = Math.round((end - today) / 86400000);
-    var daysToSunday = (7 - today.getDay()) % 7;
-    var short = MONTHS[end.getMonth()] + ' ' + end.getDate();
-    if (left < 0) return { cls: 'expired', text: 'Expired ' + short, inWeek: false, expired: true };
-    if (left > daysToSunday) return { cls: 'later', text: 'Ends ' + short, inWeek: false, expired: false };
-    if (left === 0) return { cls: 'today', text: 'Ends today', inWeek: true, expired: false };
-    if (left === 1) return { cls: 'tomorrow', text: 'Ends tomorrow', inWeek: true, expired: false };
-    return { cls: 'week', text: 'Ends ' + DAYS[end.getDay()], inWeek: true, expired: false };
-  }
-
-  var q = document.getElementById('q');
-  var grid = document.getElementById('grid');
-  var listBtn = document.getElementById('list-toggle');
-  var copyBtn = document.getElementById('copy-btn');
-  var sourceBtn = document.getElementById('source-toggle');
-  var newBtn = document.getElementById('new-toggle');
-  var clrBtn = document.getElementById('clr-toggle');
-  var weekBtn = document.getElementById('week-toggle');
-  var clearBtn = document.getElementById('clear-list');
-  var resetBtn = document.getElementById('reset-btn');
-  var shownEl = document.getElementById('shown-count');
-  var emptyMsg = document.getElementById('no-match');
-  var colBtns = Array.prototype.slice.call(document.querySelectorAll('[data-cols]'));
-  var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
-  var checks = Array.prototype.slice.call(document.querySelectorAll('.shop-check'));
-
-  var shoppingList = load(LIST_KEY, []);
-  if (!Array.isArray(shoppingList)) shoppingList = [];
-  var state = { listOnly: false, newOnly: false, clrOnly: false, weekOnly: false, viewingMonday: false };
-
-  var now = new Date();
-  var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  cards.forEach(function (el) {
-    var s = el.getAttribute('data-end');
-    var badge = el.querySelector('.end-badge');
-    if (!s || !badge) return;
-    var r = classifyEnd(s, today);
-    badge.className = 'end-badge ' + r.cls;
-    badge.textContent = r.text;
-    badge.hidden = false;
-    if (r.expired) el.classList.add('is-expired');
-    if (r.inWeek) el.setAttribute('data-week', '1');
-  });
-
-  function inList(url) { return shoppingList.indexOf(url) !== -1; }
-  function listCountOnPage() {
-    return cards.filter(function (el) { return inList(el.getAttribute('data-url')); }).length;
-  }
-
-  function render() {
-    var t = q.value.trim().toLowerCase();
-    var shown = 0;
-    cards.forEach(function (el) {
-      var isMonday = el.classList.contains('is-monday');
-      var matchesSource = state.viewingMonday ? isMonday : !isMonday;
-      var ok = matchesSource &&
-               (!t || el.getAttribute('data-t').indexOf(t) !== -1) &&
-               (!state.newOnly || el.classList.contains('is-new')) &&
-               (!state.clrOnly || el.classList.contains('is-clr')) &&
-               (!state.weekOnly || el.getAttribute('data-week') === '1') &&
-               (!state.listOnly || inList(el.getAttribute('data-url')));
-      el.hidden = !ok;
-      if (ok) shown++;
-    });
-
-    var n = listCountOnPage();
-    listBtn.innerHTML = state.listOnly ? 'Show all items' : '&#128722; List (' + n + ')';
-    listBtn.classList.toggle('active', state.listOnly);
-    sourceBtn.textContent = state.viewingMonday ? '📅 Showing: Monday Flyer' : '📅 Showing: Weekend Update';
-    newBtn.style.opacity = state.viewingMonday ? '0.4' : '1';
-    newBtn.disabled = state.viewingMonday;
-    
-    [[clrBtn, state.clrOnly], [weekBtn, state.weekOnly]].forEach(function (pair) {
-      pair[0].classList.toggle('active', pair[1]);
-      pair[0].setAttribute('aria-pressed', pair[1] ? 'true' : 'false');
-    });
-    clearBtn.hidden = n === 0;
-    clearBtn.textContent = 'Clear list (' + n + ')';
-    shownEl.textContent = shown;
-
-    if (shown === 0) {
-      emptyMsg.textContent = 'No items match your filters.';
+    function load(key, fallback) {
+      try {
+        var raw = localStorage.getItem(key);
+        return raw === null ? fallback : JSON.parse(raw);
+      } catch (e) { return fallback; }
     }
-    emptyMsg.hidden = shown !== 0;
-  }
+    function save(key, value) {
+      try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+    }
 
-  checks.forEach(function (chk) {
-    var url = chk.getAttribute('data-url');
-    chk.checked = inList(url);
-    chk.addEventListener('change', function () {
-      if (chk.checked) {
-        if (!inList(url)) shoppingList.push(url);
-      } else {
-        shoppingList = shoppingList.filter(function (u) { return u !== url; });
+    function classifyEnd(s, today) {
+      var p = s.split('-');
+      var end = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+      var left = Math.round((end - today) / 86400000);
+      var daysToSunday = (7 - today.getDay()) % 7;
+      var short = MONTHS[end.getMonth()] + ' ' + end.getDate();
+      if (left < 0) return { cls: 'expired', text: 'Expired ' + short, inWeek: false, expired: true };
+      if (left > daysToSunday) return { cls: 'later', text: 'Ends ' + short, inWeek: false, expired: false };
+      if (left === 0) return { cls: 'today', text: 'Ends today', inWeek: true, expired: false };
+      if (left === 1) return { cls: 'tomorrow', text: 'Ends tomorrow', inWeek: true, expired: false };
+      return { cls: 'week', text: 'Ends ' + DAYS[end.getDay()], inWeek: true, expired: false };
+    }
+
+    var q = document.getElementById('q');
+    var grid = document.getElementById('grid');
+    var listBtn = document.getElementById('list-toggle');
+    var copyBtn = document.getElementById('copy-btn');
+    var sourceBtn = document.getElementById('source-toggle');
+    var newBtn = document.getElementById('new-toggle');
+    var clrBtn = document.getElementById('clr-toggle');
+    var weekBtn = document.getElementById('week-toggle');
+    var clearBtn = document.getElementById('clear-list');
+    var resetBtn = document.getElementById('reset-btn');
+    var shownEl = document.getElementById('shown-count');
+    var emptyMsg = document.getElementById('no-match');
+    var colBtns = Array.prototype.slice.call(document.querySelectorAll('[data-cols]'));
+    var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
+    var checks = Array.prototype.slice.call(document.querySelectorAll('.shop-check'));
+
+    var shoppingList = load(LIST_KEY, []);
+    if (!Array.isArray(shoppingList)) shoppingList = [];
+    var state = { listOnly: false, newOnly: false, clrOnly: false, weekOnly: false, viewingMonday: false };
+
+    var now = new Date();
+    var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    cards.forEach(function (el) {
+      var s = el.getAttribute('data-end');
+      var badge = el.querySelector('.end-badge');
+      if (!s || !badge) return;
+      var r = classifyEnd(s, today);
+      badge.className = 'end-badge ' + r.cls;
+      badge.textContent = r.text;
+      badge.hidden = false;
+      if (r.expired) el.classList.add('is-expired');
+      if (r.inWeek) el.setAttribute('data-week', '1');
+    });
+
+    function inList(url) { return shoppingList.indexOf(url) !== -1; }
+    function listCountOnPage() {
+      return cards.filter(function (el) { return inList(el.getAttribute('data-url')); }).length;
+    }
+
+    function render() {
+      var t = q.value.trim().toLowerCase();
+      var shown = 0;
+      cards.forEach(function (el) {
+        var isMonday = el.classList.contains('is-monday');
+        var matchesSource = state.viewingMonday ? isMonday : !isMonday;
+        var ok = matchesSource &&
+                 (!t || el.getAttribute('data-t').indexOf(t) !== -1) &&
+                 (!state.newOnly || el.classList.contains('is-new')) &&
+                 (!state.clrOnly || el.classList.contains('is-clr')) &&
+                 (!state.weekOnly || el.getAttribute('data-week') === '1') &&
+                 (!state.listOnly || inList(el.getAttribute('data-url')));
+        el.hidden = !ok;
+        if (ok) shown++;
+      });
+
+      var n = listCountOnPage();
+      listBtn.innerHTML = state.listOnly ? 'Show all items' : '&#128722; List (' + n + ')';
+      listBtn.classList.toggle('active', state.listOnly);
+      sourceBtn.textContent = state.viewingMonday ? '📅 Showing: Monday Flyer' : '📅 Showing: Weekend Update';
+      newBtn.style.opacity = state.viewingMonday ? '0.4' : '1';
+      newBtn.disabled = state.viewingMonday;
+      
+      [[clrBtn, state.clrOnly], [weekBtn, state.weekOnly]].forEach(function (pair) {
+        pair[0].classList.toggle('active', pair[1]);
+        pair[0].setAttribute('aria-pressed', pair[1] ? 'true' : 'false');
+      });
+      clearBtn.hidden = n === 0;
+      clearBtn.textContent = 'Clear list (' + n + ')';
+      shownEl.textContent = shown;
+
+      if (shown === 0) {
+        emptyMsg.textContent = 'No items match your filters.';
       }
-      save(LIST_KEY, shoppingList);
+      emptyMsg.hidden = shown !== 0;
+    }
+
+    checks.forEach(function (chk) {
+      var url = chk.getAttribute('data-url');
+      chk.checked = inList(url);
+      chk.addEventListener('change', function () {
+        if (chk.checked) {
+          if (!inList(url)) shoppingList.push(url);
+        } else {
+          shoppingList = shoppingList.filter(function (u) { return u !== url; });
+        }
+        save(LIST_KEY, shoppingList);
+        render();
+      });
+    });
+
+    sourceBtn.addEventListener('click', function () {
+      state.viewingMonday = !state.viewingMonday;
+      if (state.viewingMonday) state.newOnly = false;
       render();
     });
-  });
+    listBtn.addEventListener('click', function () { state.listOnly = !state.listOnly; render(); });
+    newBtn.addEventListener('click', function () { if (!state.viewingMonday) { state.newOnly = !state.newOnly; render(); } });
+    clrBtn.addEventListener('click', function () { state.clrOnly = !state.clrOnly; render(); });
+    weekBtn.addEventListener('click', function () { state.weekOnly = !state.weekOnly; render(); });
+    q.addEventListener('input', render);
 
-  sourceBtn.addEventListener('click', function () {
-    state.viewingMonday = !state.viewingMonday;
-    if (state.viewingMonday) state.newOnly = false;
-    render();
-  });
-  listBtn.addEventListener('click', function () { state.listOnly = !state.listOnly; render(); });
-  newBtn.addEventListener('click', function () { if (!state.viewingMonday) { state.newOnly = !state.newOnly; render(); } });
-  clrBtn.addEventListener('click', function () { state.clrOnly = !state.clrOnly; render(); });
-  weekBtn.addEventListener('click', function () { state.weekOnly = !state.weekOnly; render(); });
-  q.addEventListener('input', render);
-
-  copyBtn.addEventListener('click', function () {
-    if (shoppingList.length === 0) {
-      alert('Your shopping list is empty!');
-      return;
-    }
-    var itemsText = [];
-    cards.forEach(function (el) {
-      var url = el.getAttribute('data-url');
-      if (inList(url)) {
-        var label = el.querySelector('figcaption').textContent.trim();
-        itemsText.push('- ' + label);
+    copyBtn.addEventListener('click', function () {
+      if (shoppingList.length === 0) {
+        alert('Your shopping list is empty!');
+        return;
       }
+      var itemsText = [];
+      cards.forEach(function (el) {
+        var url = el.getAttribute('data-url');
+        if (inList(url)) {
+          var label = el.querySelector('figcaption').textContent.trim();
+          itemsText.push('- ' + label);
+        }
+      });
+      navigator.clipboard.writeText("Costco Shopping List:\n" + itemsText.join('\n')).then(function () {
+        alert('Shopping list copied to clipboard!');
+      }).catch(function (err) {
+        alert('Failed to copy: ' + err);
+      });
     });
-    navigator.clipboard.writeText("Costco Shopping List:\n" + itemsText.join('\n')).then(function () {
-      alert('Shopping list copied to clipboard!');
-    }).catch(function (err) {
-      alert('Failed to copy: ' + err);
+
+    resetBtn.addEventListener('click', function () {
+      q.value = '';
+      state.newOnly = false;
+      state.clrOnly = false;
+      state.weekOnly = false;
+      state.listOnly = false;
+      state.viewingMonday = false;
+      render();
     });
-  });
 
-  resetBtn.addEventListener('click', function () {
-    q.value = '';
-    state.newOnly = false;
-    state.clrOnly = false;
-    state.weekOnly = false;
-    state.listOnly = false;
-    state.viewingMonday = false;
-    render();
-  });
+    clearBtn.addEventListener('click', function () {
+      var n = listCountOnPage();
+      if (!n) return;
+      if (!window.confirm('Remove all ' + n + ' items from your shopping list?')) return;
+      shoppingList = [];
+      save(LIST_KEY, shoppingList);
+      checks.forEach(function (chk) { chk.checked = false; });
+      state.listOnly = false;
+      render();
+    });
 
-  clearBtn.addEventListener('click', function () {
-    var n = listCountOnPage();
-    if (!n) return;
-    if (!window.confirm('Remove all ' + n + ' items from your shopping list?')) return;
-    shoppingList = [];
-    save(LIST_KEY, shoppingList);
-    checks.forEach(function (chk) { chk.checked = false; });
-    state.listOnly = false;
-    render();
-  });
-
-  function setCols(n) {
-    n = (n === 1) ? 1 : 2;
-    grid.classList.remove('c1', 'c2');
-    grid.classList.add('c' + n);
+    function setCols(n) {
+      n = (n === 1) ? 1 : 2;
+      grid.classList.remove('c1', 'c2');
+      grid.classList.add('c' + n);
+      colBtns.forEach(function (b) {
+        var on = Number(b.getAttribute('data-cols')) === n;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+      save(COLS_KEY, n);
+    }
     colBtns.forEach(function (b) {
-      var on = Number(b.getAttribute('data-cols')) === n;
-      b.classList.toggle('active', on);
-      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      b.addEventListener('click', function () { setCols(Number(b.getAttribute('data-cols'))); });
     });
-    save(COLS_KEY, n);
-  }
-  colBtns.forEach(function (b) {
-    b.addEventListener('click', function () { setCols(Number(b.getAttribute('data-cols'))); });
-  });
-  setCols(Number(load(COLS_KEY, 2)));
+    setCols(Number(load(COLS_KEY, 2)));
 
-  render();
+    render();
+  } catch (err) {
+    alert("Script Error: " + err.message);
+  }
 })();
 </script>
 </body>
