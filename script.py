@@ -42,25 +42,25 @@ def main():
         title = item.find('title').get_text().lower() if item.find('title') else ''
         link = item.find('link').get_text().strip() if item.find('link') else ''
         
-        # Weekend post explicitly has "weekend" in title or link
         if 'weekend' in title or 'weekend' in link:
             if not weekend_url:
                 weekend_url = link
-        # Monday post is a standard sale items post that does NOT have "weekend"
         elif 'sale items' in title or 'costco' in title:
-            if not monday_url:
+            if not monday_url and 'weekend' not in title and 'weekend' not in link:
                 monday_url = link
 
+    print(f"Parsed Monday URL: {monday_url}")
+    print(f"Parsed Weekend URL: {weekend_url}")
+
     if not monday_url or not weekend_url:
-        print(f"RSS matching results -> Monday: {monday_url}, Weekend: {weekend_url}")
         print("Could not locate both posts from feed.")
         return
 
-    print(f"Found Monday Post: {monday_url}")
-    print(f"Found Weekend Post: {weekend_url}")
-
     monday_items = {item['filename'] for item in get_post_images(monday_url)}
     weekend_items = get_post_images(weekend_url)
+
+    print(f"Found {len(monday_items)} images on Monday post.")
+    print(f"Found {len(weekend_items)} images on Weekend post.")
 
     new_deals = [item for item in weekend_items if item['filename'] not in monday_items]
     print(f"Found {len(new_deals)} new weekend deals!")
@@ -101,6 +101,8 @@ def main():
 
     with open('index.html', 'w', encoding='utf-8') as f:
         f.write(html_page)
+
+    print("Successfully wrote index.html!")
 
     # Email Digest
     sender_email = os.environ.get("MAIL_USERNAME")
