@@ -116,11 +116,12 @@ KNOWN_LAZY_ATTRS = ("data-src", "data-lazy-src", "data-original", "data-orig-fil
 SRCSET_ATTRS = ("data-srcset", "data-lazy-srcset", "srcset")
 CONTAINER_SELECTORS = ("article .entry-content", ".entry-content", ".post-content",
                        ".single-content", "article", "main", "#content")
+
 BAD_FILENAME_RE = re.compile(
     r"(logo|banner|avatar|gravatar|icon|sprite|emoji|placeholder|spinner|loader|"
     r"button|badge|social|facebook|twitter|instagram|pinterest|youtube|tiktok|"
     r"advert|sponsor|cropped-|blank|pixel|1x1|spacer|newsletter|subscribe|"
-    r"sale|next-week|header|what-is-on-sale)", re.I)
+    r"next-week|what-is-on-sale|sale-next-week|promo-header)", re.I)
 BAD_HOSTS = ("gravatar.com", "s.w.org", "doubleclick.net", "googlesyndication.com",
              "facebook.com", "facebook.net", "google-analytics.com")
 BAD_CLASS_RE = re.compile(
@@ -221,10 +222,21 @@ def find_item_no(alt: str, url: str) -> str:
 def reject_reason(img, url: str, container):
     """Return None if the image should be kept, else a short reason string."""
     u = urlparse(url)
-    alt = (img.get("alt") or img.get("title") or "").lower()
     
-    # Block the weekly blog promo banner by its alt text
-    if "what is on sale next week" in alt or "sales from last year" in alt:
+    # Gather all text associated with this image to catch promo banners reliably
+    fig = img.find_parent("figure")
+    cap = fig.find("figcaption") if fig else None
+    cap_text = cap.get_text(" ", strip=True) if cap else ""
+    
+    blob = " ".join([
+        img.get("alt") or "",
+        img.get("title") or "",
+        cap_text,
+        Path(u.path).name
+    ]).lower()
+
+    # Reject non-product promotional site banners
+    if "what is on sale next week" in blob or "sales from last year" in blob:
         return "promo_banner"
 
     if any(h in u.netloc.lower() for h in BAD_HOSTS):
