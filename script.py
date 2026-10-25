@@ -119,7 +119,8 @@ CONTAINER_SELECTORS = ("article .entry-content", ".entry-content", ".post-conten
 BAD_FILENAME_RE = re.compile(
     r"(logo|banner|avatar|gravatar|icon|sprite|emoji|placeholder|spinner|loader|"
     r"button|badge|social|facebook|twitter|instagram|pinterest|youtube|tiktok|"
-    r"advert|sponsor|cropped-|blank|pixel|1x1|spacer|newsletter|subscribe)", re.I)
+    r"advert|sponsor|cropped-|blank|pixel|1x1|spacer|newsletter|subscribe|"
+    r"sale|next-week|header|what-is-on-sale)", re.I)
 BAD_HOSTS = ("gravatar.com", "s.w.org", "doubleclick.net", "googlesyndication.com",
              "facebook.com", "facebook.net", "google-analytics.com")
 BAD_CLASS_RE = re.compile(
@@ -218,7 +219,14 @@ def find_item_no(alt: str, url: str) -> str:
     return m.group(1) if m else ""
 
 def reject_reason(img, url: str, container):
+    """Return None if the image should be kept, else a short reason string."""
     u = urlparse(url)
+    alt = (img.get("alt") or img.get("title") or "").lower()
+    
+    # Block the weekly blog promo banner by its alt text
+    if "what is on sale next week" in alt or "sales from last year" in alt:
+        return "promo_banner"
+
     if any(h in u.netloc.lower() for h in BAD_HOSTS):
         return "bad_host"
     if u.path.lower().endswith((".svg", ".ico")):
