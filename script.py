@@ -42,10 +42,12 @@ def main():
         title = item.find('title').get_text().lower() if item.find('title') else ''
         link = item.find('link').get_text().strip() if item.find('link') else ''
         
+        # Weekend post explicitly has "weekend" in title or link
         if 'weekend' in title or 'weekend' in link:
             if not weekend_url:
                 weekend_url = link
-        elif ('sale items' in title or 'monday' in title) and not weekend_url:
+        # Monday post is a standard sale items post that does NOT have "weekend"
+        elif 'sale items' in title or 'costco' in title:
             if not monday_url:
                 monday_url = link
 
@@ -98,7 +100,7 @@ def main():
     with open('index.html', 'w', encoding='utf-8') as f:
         f.write(html_page)
 
-    # Email Digest (if secrets exist)
+    # Email Digest
     sender_email = os.environ.get("MAIL_USERNAME")
     receiver_email = os.environ.get("MAIL_TO")
     app_password = os.environ.get("MAIL_PASSWORD")
