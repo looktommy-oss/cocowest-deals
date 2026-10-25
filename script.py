@@ -512,11 +512,12 @@ def main() -> int:
 
     print(f"Total weekend items: {len(weekend_items)} | New exclusives highlighted: {len(exclusive_urls)}")
 
-    (OUTPUT_DIR / "index.html").write_text(
+(OUTPUT_DIR / "index.html").write_text(
         render_html(weekend_items, exclusive_urls, monday_url, weekend_url, len(monday_items)),
         encoding="utf-8")
+
 import smtplib
-    from email.mime.text import MIMEText
+from email.mime.text import MIMEText
     
     mail_user = os.getenv("MAIL_USERNAME")
     mail_pass = os.getenv("MAIL_PASSWORD")
