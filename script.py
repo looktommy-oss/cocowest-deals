@@ -92,11 +92,13 @@ def main():
             <img src="{deal['src']}" alt="{deal['alt']}" loading="lazy">
         </div>
         """
+        
     html_page += """
     </div>
 </body>
 </html>
 """
+
     with open('index.html', 'w', encoding='utf-8') as f:
         f.write(html_page)
 
