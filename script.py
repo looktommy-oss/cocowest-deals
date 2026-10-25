@@ -1,4 +1,5 @@
 import os
+import re
 import smtplib
 import requests
 from bs4 import BeautifulSoup
@@ -6,20 +7,24 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 def get_post_images(url):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     try:
         resp = requests.get(url, headers=headers, timeout=15)
         if resp.status_code != 200:
+            print(f"Failed to fetch {url}, status code: {resp.status_code}")
             return []
         soup = BeautifulSoup(resp.text, 'html.parser')
-        content = soup.find('div', class_='entry-content') or soup.find('article') or soup
+        
+        # Get post content container
+        content = soup.find('div', class_=re.compile(r'entry-content|post-content')) or soup.find('article') or soup
         
         items = []
         for img in content.find_all('img'):
-            src = img.get('src', '') or img.get('data-src', '')
+            src = img.get('src', '') or img.get('data-src', '') or img.get('data-lazy-src', '')
             if 'uploads' in src or 'wp-content' in src:
                 filename = src.split('/')[-1].split('?')[0]
-                if not any(k in filename.lower() for k in ['logo', 'avatar', 'header', 'banner', 'gravatar', 'icon']):
+                # Filter out standard UI elements
+                if not any(k in filename.lower() for k in ['logo', 'avatar', 'header', 'banner', 'gravatar', 'icon', 'button', 'badge']):
                     items.append({'filename': filename, 'src': src, 'alt': img.get('alt', 'Deal Image')})
         return items
     except Exception as e:
@@ -27,43 +32,52 @@ def get_post_images(url):
         return []
 
 def main():
-    print("Fetching CocoWest RSS feed...")
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    feed_url = 'https://cocowest.ca/feed/'
-    resp = requests.get(feed_url, headers=headers, timeout=15)
+    print("Scraping CocoWest homepage...")
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     
-    soup = BeautifulSoup(resp.text, 'xml')
-    items = soup.find_all('item')
+    # 1. Fetch homepage to get exact URLs
+    home_url = 'https://cocowest.ca/'
+    resp = requests.get(home_url, headers=headers, timeout=15)
+    soup = BeautifulSoup(resp.text, 'html.parser')
     
     monday_url = None
     weekend_url = None
-    
-    for item in items:
-        title = item.find('title').get_text().lower() if item.find('title') else ''
-        link = item.find('link').get_text().strip() if item.find('link') else ''
-        
-        if 'weekend' in title or 'weekend' in link:
+
+    # Scan all links on homepage
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        href_lower = href.lower()
+
+        # Identify Weekend Post
+        if 'weekend-update' in href_lower or ('weekend' in href_lower and 'costco-sale-items' in href_lower):
             if not weekend_url:
-                weekend_url = link
-        elif 'sale items' in title or 'costco' in title:
-            if not monday_url and 'weekend' not in title and 'weekend' not in link:
-                monday_url = link
+                weekend_url = href
 
-    print(f"Parsed Monday URL: {monday_url}")
-    print(f"Parsed Weekend URL: {weekend_url}")
+        # Identify Monday Post (Contains "costco-flyer" or "october-19-25" / "monday")
+        elif ('costco-flyer' in href_lower or 'monday' in href_lower) and 'weekend' not in href_lower:
+            if not monday_url:
+                monday_url = href
 
-    if not monday_url or not weekend_url:
-        print("Could not locate both posts from feed.")
-        return
+    # Fallback to direct URLs if homepage layout shifts
+    if not weekend_url:
+        weekend_url = "https://cocowest.ca/2026/10/weekend-update-costco-sale-items-for-october-23-25-2026-for-bc-ab-mb-sk/"
+    if not monday_url:
+        monday_url = "https://cocowest.ca/2026/10/costco-flyer-costco-sale-items-for-october-19-25-2026-2026-for-bc-ab-sk-mb/"
 
-    monday_items = {item['filename'] for item in get_post_images(monday_url)}
+    print(f"Target Monday Post:  {monday_url}")
+    print(f"Target Weekend Post: {weekend_url}")
+
+    monday_items = get_post_images(monday_url)
     weekend_items = get_post_images(weekend_url)
 
+    monday_filenames = {item['filename'] for item in monday_items}
+    
     print(f"Found {len(monday_items)} images on Monday post.")
     print(f"Found {len(weekend_items)} images on Weekend post.")
 
-    new_deals = [item for item in weekend_items if item['filename'] not in monday_items]
-    print(f"Found {len(new_deals)} new weekend deals!")
+    # Compare image filenames
+    new_deals = [item for item in weekend_items if item['filename'] not in monday_filenames]
+    print(f"Found {len(new_deals)} exclusive weekend deals!")
 
     # Build HTML Page
     html_page = f"""<!DOCTYPE html>
@@ -102,9 +116,9 @@ def main():
     with open('index.html', 'w', encoding='utf-8') as f:
         f.write(html_page)
 
-    print("Successfully wrote index.html!")
+    print("Successfully generated index.html!")
 
-    # Email Digest
+    # Optional Email Digest
     sender_email = os.environ.get("MAIL_USERNAME")
     receiver_email = os.environ.get("MAIL_TO")
     app_password = os.environ.get("MAIL_PASSWORD")
