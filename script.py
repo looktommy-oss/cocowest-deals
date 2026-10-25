@@ -761,7 +761,7 @@ def render_html(weekend_items, monday_items, exclusive_urls, monday_url, weekend
         if clearance:
             classes.append("is-clr")
 
-        safe_label = re.sub(r'[\r\n]+', ' ', i.label).strip()
+        safe_label = re.sub(r'[\r\n]+', ' ', i.label).replace('\\', ' ').strip()
         safe_label_lower = safe_label.lower()
 
         attrs = f'data-index="{idx}" data-t="{esc(safe_label_lower, quote=True)}" data-url="{esc(i.url, quote=True)}"'
@@ -796,7 +796,7 @@ def render_html(weekend_items, monday_items, exclusive_urls, monday_url, weekend
         if clearance:
             classes.append("is-clr")
 
-        safe_label = re.sub(r'[\r\n]+', ' ', i.label).strip()
+        safe_label = re.sub(r'[\r\n]+', ' ', i.label).replace('\\', ' ').strip()
         safe_label_lower = safe_label.lower()
 
         attrs = f'data-index="{idx}" data-t="{esc(safe_label_lower, quote=True)}" data-url="{esc(i.url, quote=True)}"'
