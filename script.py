@@ -1,4 +1,5 @@
 import os
+import re
 import smtplib
 import requests
 from bs4 import BeautifulSoup
@@ -21,7 +22,7 @@ def get_post_images(url):
             src = img.get('src', '')
             if 'uploads' in src or 'wp-content' in src:
                 filename = src.split('/')[-1].split('?')[0]
-                if not any(k in filename.lower() for k in ['logo', 'avatar', 'header', 'banner', 'gravatar']):
+                if not any(k in filename.lower() for k in ['logo', 'avatar', 'header', 'banner', 'gravatar', 'icon']):
                     items.append({'filename': filename, 'src': src, 'alt': img.get('alt', 'Deal Image')})
         return items
     except Exception as e:
@@ -30,23 +31,33 @@ def get_post_images(url):
 
 def main():
     print("Scanning CocoWest homepage...")
-    home_resp = requests.get('https://cocowest.ca/', headers={'User-Agent': 'Mozilla/5.0'})
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    home_resp = requests.get('https://cocowest.ca/', headers=headers)
     soup = BeautifulSoup(home_resp.text, 'html.parser')
     
-    links = soup.find_all('a', href=True)
+    # Locate post articles/links on homepage
+    articles = soup.find_all(['article', 'div'], class_=re.compile(r'post|entry'))
+    
     monday_url = None
     weekend_url = None
     
-    for l in links:
-        href = l['href']
-        text = l.get_text().lower()
-        if ('sale-items-for' in href or 'monday' in text) and not 'weekend' in text and not monday_url:
-            monday_url = href
-        if ('weekend' in text or 'weekend' in href) and not weekend_url:
-            weekend_url = href
+    for art in articles:
+        link = art.find('a', href=True)
+        if not link:
+            continue
+        href = link['href']
+        text = art.get_text().lower()
+        
+        if 'weekend' in text or 'weekend' in href:
+            if not weekend_url:
+                weekend_url = href
+        elif 'sale-items-for' in href or 'costco-sale-items' in href or 'monday' in text:
+            if not monday_url:
+                monday_url = href
 
     if not monday_url or not weekend_url:
-        print("Could not automatically locate both Monday and Weekend posts.")
+        print(f"Post matching results -> Monday: {monday_url}, Weekend: {weekend_url}")
+        print("Could not automatically locate both posts.")
         return
 
     print(f"Found Monday Post: {monday_url}")
@@ -58,11 +69,12 @@ def main():
     new_deals = [item for item in weekend_items if item['filename'] not in monday_items]
     print(f"Found {len(new_deals)} new weekend deals!")
 
-    # 1. Generate index.html (Private Web Page)
+    # Generate index.html
     html_page = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>CocoWest New Weekend Deals</title>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f6f8; margin: 0; padding: 20px; color: #333; }}
@@ -92,7 +104,7 @@ def main():
     with open('index.html', 'w', encoding='utf-8') as f:
         f.write(html_page)
 
-    # 2. Send Email Digest
+    # Email Digest
     sender_email = os.environ.get("MAIL_USERNAME")
     receiver_email = os.environ.get("MAIL_TO")
     app_password = os.environ.get("MAIL_PASSWORD")
@@ -112,7 +124,7 @@ def main():
         except Exception as e:
             print(f"Failed to send email: {e}")
     else:
-        print("Email credentials not found in environment secrets, skipping email.")
+        print("Email credentials omitted or incomplete, skipping email digest.")
 
 if __name__ == '__main__':
     main()
