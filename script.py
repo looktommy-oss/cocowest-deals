@@ -545,23 +545,23 @@ def scrape_cocowest_item_history(scraper, item_no: str):
     try:
         html_text = fetch(scraper, url, retries=2)
         soup = BeautifulSoup(html_text, "html.parser")
-        table = soup.find("table")
-        if not table:
-            return []
         
         records = []
-        rows = table.find_all("tr")
-        for tr in rows[1:]:  # skip header
-            tds = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
+        rows = soup.find_all("tr")
+        for tr in rows:
+            tds = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
             if len(tds) >= 4:
-                # Format: Posted (0), Savings (1), Expiry (2), Price (3)
+                date_posted = tds[0].strip()
                 p_str = tds[3].replace("$", "").replace(",", "").strip()
-                try:
-                    price = float(p_str)
-                    date_posted = tds[0].strip()
-                    records.append({"date": date_posted, "price": price, "pct": None})
-                except ValueError:
-                    continue
+                
+                # Ensure the posted date matches YYYY-MM-DD format
+                if re.match(r"^\d{4}-\d{2}-\d{2}$", date_posted):
+                    try:
+                        price = float(p_str)
+                        records.append({"date": date_posted, "price": price, "pct": None})
+                    except ValueError:
+                        continue
+                        
         return records
     except Exception as exc:
         print(f"[history] Could not fetch history for SKU {item_no}: {exc!r}", file=sys.stderr)
@@ -580,7 +580,7 @@ def update_price_db(scraper, prev_state, target_items, valid_range):
         entry = db.get(ident, {"name": i.label, "item_no": i.item_no, "history": [], "full_scraped": False})
 
         # Deep scrape history from CocoWest item page if we haven't already
-        if i.item_no and not entry.get("full_scraped"):
+       if i.item_no and (not entry.get("full_scraped") or len(entry.get("history", [])) <= 1):
             print(f"[history] Deep scraping CocoWest price history for SKU {i.item_no}...")
             remote_records = scrape_cocowest_item_history(scraper, i.item_no)
             if remote_records:
