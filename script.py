@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Scrape CocoWest.ca for Costco posts with highly comprehensive category tagging and filtering,
-smart date-aware post discovery, shopping list, store location, clearance tags, and end dates.
+Scrape CocoWest.ca for Costco posts with category tagging and filtering,
+smart date-aware post discovery, Vancouver time stamps, shopping list, store location, clearance tags, and end dates.
 
 Env overrides:
   MONDAY_URL, WEEKEND_URL      skip homepage discovery
@@ -20,6 +20,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from difflib import SequenceMatcher
 from email.message import EmailMessage
 from pathlib import Path
@@ -163,7 +164,6 @@ class Item:
     item_no: str
     category: str
 
-# Super-comprehensive keyword rules to capture almost every Costco product variation
 CATEGORY_RULES = {
     "appliances": re.compile(r"\b(toaster|blender|coffee|espresso|air\s*fryer|microwave|mixer|cookware|pan|pot|kettle|vacuum|shaver|toothbrush|fan|heater|grill|cooker|fridge|freezer|iron|steamer|ice\s*maker|juicer|food\s*processor)\b", re.I),
     "electronics": re.compile(r"\b(tv|television|monitor|speaker|headphone|earbud|soundbar|sound\s*bar|laptop|tablet|phone|iphone|galaxy|ipad|macbook|charger|cable|router|camera|smart\s*watch|projector|receiver|hdmi|usb|hub|apple|samsung|sony|bose|jbl)\b", re.I),
@@ -503,10 +503,10 @@ PAGE_TEMPLATE = """<!doctype html>
   .search { max-width:1200px; margin:.5rem auto 0; display:flex; gap:.5rem; }
   .search input { flex:1; min-width:0; padding:.6rem .8rem; font-size:16px; border:1px solid var(--line); border-radius:10px;
                   background:var(--card); color:var(--fg); }
-  .toolbar { max-width:1200px; margin:0 auto; padding:0 .8rem .6rem; display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; }
-  .chip { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:999px; padding:.3rem .75rem;
-          font-size:.85rem; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; }
-  .chip.icon-only { padding:.3rem .55rem; font-size:1rem; }
+  .toolbar { max-width:1200px; margin:0 auto; padding:0 .8rem .6rem; display:flex; flex-wrap:wrap; align-items:center; gap:.35rem; }
+  .chip { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:999px; padding:.25rem .65rem;
+          font-size:.8rem; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; white-space:nowrap; }
+  .chip.icon-only { padding:.25rem .5rem; font-size:.95rem; }
   .chip.active { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
   .chip.danger { color:var(--danger); border-color:var(--danger); }
   .cols-toggle { display:none; align-items:center; gap:.35rem; margin-left:auto; font-size:.8rem; color:var(--muted); }
@@ -545,7 +545,9 @@ PAGE_TEMPLATE = """<!doctype html>
   .empty { padding:2rem 1rem; text-align:center; color:var(--muted); grid-column:1/-1; }
   @media (max-width:640px) {
     .cols-toggle { display:flex; }
-    .toolbar { padding:0 .6rem .5rem; }
+    .toolbar { padding:0 .6rem .5rem; gap:.25rem; }
+    .chip { font-size:.72rem; padding:.22rem .5rem; }
+    .chip.icon-only { font-size:.85rem; padding:.22rem .4rem; }
     .grid { padding:0 .5rem; gap:.5rem; }
     .grid.c1 { grid-template-columns:minmax(0,1fr); }
     .grid.c2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
@@ -806,7 +808,7 @@ __CARDS__
 </html>"""
 
 def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode, exclusive_urls=None) -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    stamp = datetime.now(ZoneInfo("America/Vancouver")).strftime("%Y-%m-%d %H:%M %Z")
     esc = html.escape
     exclusive_urls = exclusive_urls or set()
     
@@ -815,7 +817,7 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
 
     if is_weekend_mode:
         page_title = "Costco Weekend Deals"
-        new_btn_html = f'<button class="chip" id="new-toggle" type="button" aria-pressed="false">&#10024; New only ({new_count})</button>'
+        new_btn_html = f'<button class="chip" id="new-toggle" type="button" aria-pressed="false">&#10024; New ({new_count})</button>'
         meta_extra = f'({new_count} new exclusives highlighted)'
         source_url = weekend_url
         source_name = "Weekend Update"
