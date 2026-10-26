@@ -1,4 +1,4 @@
-Name: Update CocoWest New Deals
+name: Update CocoWest New Deals
 
 on:
   schedule:
@@ -80,4 +80,3 @@ jobs:
           publish_dir: ./public
           publish_branch: gh-pages
           force_orphan: true
-          
