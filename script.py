@@ -1013,19 +1013,20 @@ __CARDS__
         }
 
         var targetUrl = 'https://www.cocowest.ca/?s=' + sku;
-        var proxyUrl = 'https://api.allorigins.win/get?url=' + encodeURIComponent(targetUrl);
+        var proxyUrl = 'https://corsproxy.io/?' + encodeURIComponent(targetUrl);
 
         fetch(proxyUrl)
-          .then(function(res) { return res.json(); })
-          .then(function(data) {
-            console.log("Proxy HTML length:", data && data.contents ? data.contents.length : 0); // <-- Add this
-            if (!data || !data.contents) throw new Error('Empty proxy response');
+          .then(function(res) { return res.text(); }) // corsproxy returns raw HTML directly
+          .then(function(html) {
+            console.log("Proxy HTML length:", html ? html.length : 0);
+            if (!html) throw new Error('Empty proxy response');
 
             var parser = new DOMParser();
-            var doc = parser.parseFromString(data.contents, 'text/html');
+            var doc = parser.parseFromString(html, 'text/html');
             var rows = Array.prototype.slice.call(doc.querySelectorAll('tr'));
-            console.log("Found table rows:", rows.length); // <-- And add this
+            console.log("Found table rows:", rows.length);
 
+            var records = [];
             rows.forEach(function(tr) {
               var tds = Array.prototype.slice.call(tr.querySelectorAll('td, th')).map(function(td) {
                 return td.textContent.trim();
@@ -1041,6 +1042,22 @@ __CARDS__
                 }
               }
             });
+
+            if (records.length > 0) {
+              renderHistoryList(records);
+            } else if (item && item.history && item.history.length) {
+              renderHistoryList(item.history);
+            } else {
+              modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price table found on item page.</p>';
+            }
+          })
+          .catch(function(err) {
+            if (item && item.history) {
+              renderHistoryList(item.history);
+            } else {
+              modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Could not load live history.</p>';
+            }
+          });
 
             if (records.length > 0) {
               renderHistoryList(records);
