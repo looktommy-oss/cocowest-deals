@@ -3,7 +3,7 @@
 Scrape CocoWest.ca for Costco posts with robust category tagging and filtering,
 smart date-aware post discovery, Vancouver time stamps, shopping list, store location,
 clearance tags, end dates, discount % badges, sorting, list totals, emailable/shareable
-shopping list, repeat-item markers and a richer email digest.
+shopping list, repeat-item markers, permanent post archiving, and SKU price history.
 
 Env overrides:
   MONDAY_URL, WEEKEND_URL      skip homepage discovery
@@ -19,10 +19,9 @@ import smtplib
 import ssl
 import sys
 import time
-from datetime import timedelta
 from collections import Counter
 from dataclasses import dataclass, asdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from difflib import SequenceMatcher
 from email.message import EmailMessage
@@ -34,6 +33,7 @@ from bs4 import BeautifulSoup
 
 BASE_URL = "https://www.cocowest.ca/"
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "public"))
+ARCHIVE_DIR = OUTPUT_DIR / "archives"
 DEBUG = os.getenv("DEBUG") == "1"
 MATCH_MODE = os.getenv("MATCH_MODE", "smart").lower()
 
@@ -94,9 +94,6 @@ def is_post_link(href: str) -> bool:
         return False
     return not re.search(r"\.(jpe?g|png|gif|webp|pdf|xml)$", path, re.I)
 
-# Post titles carry their valid dates, e.g. "Costco Sale Items for October 23-25, 2026"
-# or "October 26-November 1, 2026". These helpers read those dates so the script knows
-# whether a post is still current, instead of just trusting whatever is newest on the page.
 SALES_POST_RE = re.compile(r"(costco[-_\s]+flyer|sale[-_\s]+items)", re.I)
 
 _MONTH_NAMES = ("january", "february", "march", "april", "may", "june", "july", "august",
@@ -115,8 +112,6 @@ def _month_num(name: str):
     return _MONTH_ALIASES.get(n)
 
 def parse_range(text: str):
-    """Pull a date range like 'October 23-25, 2026' out of a title or URL slug.
-    Returns (start_date, end_date) or None when no range is found."""
     m = RANGE_RE.search(text or "")
     if not m:
         return None
@@ -132,7 +127,6 @@ def parse_range(text: str):
     return (start, end) if start <= end else None
 
 def range_from_html(post_html: str):
-    """Read the date range from a fetched post's heading / title."""
     soup = BeautifulSoup(post_html, "html.parser")
     texts = []
     h1 = soup.find("h1")
@@ -150,17 +144,13 @@ def range_from_html(post_html: str):
     return None
 
 def fmt_range(rng) -> str:
-    """Short HTML-ready label such as 'Oct 23 &ndash; 25' or 'Oct 26 &ndash; Nov 1'."""
     s, e = rng
     left = f"{s.strftime('%b')} {s.day}"
     same_month = e.month == s.month and e.year == s.year
     right = f"{e.day}" if same_month else f"{e.strftime('%b')} {e.day}"
     return f"{left} &ndash; {right}"
 
-
 def weekend_over(rng, forced: bool, today) -> bool:
-    """True when the weekend post's dates have passed (unless a URL was forced by env)."""
-    # Keep weekend post valid through Monday until new post drops
     effective_today = today - timedelta(days=1) if today.weekday() == 0 else today
     return (not forced) and bool(rng) and rng[1] < effective_today
 
@@ -185,21 +175,17 @@ def discover_posts(home_html: str):
                for n, (h, b) in enumerate(all_posts)]
 
     def newest(cands):
-        """Latest end date wins; ties (or no dates) fall back to page order."""
         dated = [c for c in cands if c["range"]]
         if dated:
             return max(dated, key=lambda c: (c["range"][1], -c["order"]))
         return cands[0] if cands else None
 
-    # Weekend update: a "Weekend Update" post, newest by its dates.
     weekend_pick = newest([e for e in entries if WEEKEND_RE.search(e["blob"])])
     weekend_url = weekend_env or (weekend_pick["href"] if weekend_pick else None)
     weekend_range = None
     if weekend_pick and weekend_pick["href"] == weekend_url:
         weekend_range = weekend_pick["range"]
 
-    # Monday post: must look like a flyer / sale-items post with dates in its title,
-    # so aisle posts, reviews and other new post types are never mistaken for it.
     def is_candidate(e):
         return (e["href"] != weekend_url
                 and not WEEKEND_RE.search(e["blob"])
@@ -208,7 +194,6 @@ def discover_posts(home_html: str):
     monday_pick = newest([e for e in entries
                           if is_candidate(e) and e["range"] and SALES_POST_RE.search(e["blob"])])
     if not monday_pick:
-        # Fallback to the old behaviour if the site ever changes its title style.
         monday_pick = next((e for e in entries if is_candidate(e)), None)
 
     if monday_env:
@@ -463,17 +448,10 @@ def find_exclusive_userscript(weekend_items, monday_items):
     mon = {i.us_key for i in monday_items if i.us_key}
     return [i for i in weekend_items if i.us_key and i.us_key not in mon]
 
-
-# ------------------------------------------- price, discount + end-date parsing
-
 PRICE_RE = re.compile(r"\$\s?(\d[\d,]*)\.(\d{2})\b")
 END_RE = re.compile(
     r"(?:EXPIRES|ENDS|VALID\s+(?:UNTIL|THROUGH|THRU))\s+(?:ON\s+)?(\d{4}-\d{2}-\d{2})", re.I)
 
-# Savings wording. These are best guesses at how the labels are phrased:
-#   "SAVE $5.00", "$5 OFF", "$5.00 instant savings"   -> amount saved
-#   "REG $14.99", "WAS $14.99", "REGULAR PRICE $14.99" -> original price
-#   "25% OFF"                                          -> explicit percentage
 MONEY = r"\$\s?(\d[\d,]*(?:\.\d{1,2})?)"
 SAVE_RE = re.compile(r"\b(?:you\s+)?(?:instant\s+)?(?:save|savings?)\s*(?:of\s*)?:?\s*" + MONEY, re.I)
 OFF_RE = re.compile(MONEY + r"\s*(?:off|instant\s+savings?|savings?|discount)\b", re.I)
@@ -486,7 +464,6 @@ def parse_price(label: str):
     return found[-1] if found else None
 
 def strip_savings(label: str) -> str:
-    """Remove 'save $X' / '$X off' / 'reg $X' phrases so they aren't mistaken for the sale price."""
     text = label or ""
     for rx in (SAVE_RE, OFF_RE, REG_RE):
         text = rx.sub(" ", text)
@@ -509,7 +486,6 @@ def _sane_pct(pct):
     return pct if pct is not None and 1 <= pct <= 90 else None
 
 def discount_pct(label: str):
-    """Return an int percentage off, or None when it can't be worked out reliably."""
     label = label or ""
     m = PCT_OFF_RE.search(label)
     if m:
@@ -542,15 +518,10 @@ def parse_end_date(label: str) -> str:
         return ""
     return m.group(1)
 
-
-# --------------------------------------------------------- state + alerting
-
 def item_ident(it: Item) -> str:
-    """Stable identity used to recognise the same product across weekly posts."""
     return f"no:{it.item_no}" if it.item_no else (it.file_key or it.alt_key or it.url)
 
 def _previous_entry(prev_state, mode, target_url):
-    """The 'previous post' record for this mode: the last post that is NOT the current one."""
     entry = (prev_state.get("history") or {}).get(mode) or {}
     cur = entry.get("current") or {}
     if cur.get("url") == target_url:
@@ -567,6 +538,26 @@ def build_history(prev_state, mode, target_url, ids):
         "previous": _previous_entry(prev_state, mode, target_url),
     }
     return history
+
+def update_price_db(prev_state, target_items, valid_range):
+    """Accumulates SKU price history across all runs in state.json."""
+    db = dict(prev_state.get("price_db") or {})
+    today_str = datetime.now(ZoneInfo("America/Vancouver")).strftime("%Y-%m-%d")
+    date_label = valid_range[0].isoformat() if valid_range else today_str
+
+    for i in target_items:
+        ident = item_ident(i)
+        price = price_value(i.label)
+        pct = discount_pct(i.label)
+        entry = db.get(ident, {"name": i.label, "item_no": i.item_no, "history": []})
+
+        if price is not None:
+            # Prevent duplicate logs for the same post date
+            hist = entry["history"]
+            if not hist or hist[-1]["date"] != date_label:
+                hist.append({"date": date_label, "price": price, "pct": pct})
+        db[ident] = entry
+    return db
 
 def load_previous_state(scraper):
     if not STATE_URL:
@@ -671,9 +662,6 @@ def maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, items, exclu
         subj = f"CocoWest: Monday Sales Post ({items_count} items){best_txt}"
     send_email(subj, "\n".join(lines))
 
-
-# ------------------------------------------------------------------- output
-
 PAGE_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
@@ -755,12 +743,13 @@ PAGE_TEMPLATE = """<!doctype html>
              text-transform:uppercase; }
   .card a { display:block; }
   .card img { width:100%; aspect-ratio:1/1; object-fit:contain; display:block; background:#fff; }
-  .card figcaption { padding:.5rem .6rem; font-size:.85rem; line-height:1.3; flex-grow:1; overflow-wrap:anywhere; }
+  .card figcaption { padding:.5rem .6rem; font-size:.85rem; line-height:1.3; flex-grow:1; overflow-wrap:anywhere; cursor:pointer; }
   .card-footer { padding:.4rem .6rem .6rem; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.3rem;
                  border-top:1px solid var(--line); font-size:.8rem; }
   .shop-label { display:flex; align-items:center; gap:.4rem; cursor:pointer; font-weight:500; }
   .shop-label input { width:1.1rem; height:1.1rem; accent-color:var(--accent); cursor:pointer; }
   .foot-right { display:flex; align-items:center; gap:.3rem; flex-wrap:wrap; justify-content:flex-end; margin-left:auto; }
+  .sku-badge { font-size:.68rem; font-weight:700; padding:2px 6px; border-radius:4px; background:var(--line); color:var(--fg); cursor:pointer; }
   .repeat-tag { font-size:.68rem; font-weight:600; padding:2px 7px; border-radius:999px; border:1px solid var(--line);
                 color:var(--muted); white-space:nowrap; }
   .end-badge { font-size:.72rem; font-weight:700; padding:2px 8px; border-radius:999px; white-space:nowrap; }
@@ -770,6 +759,12 @@ PAGE_TEMPLATE = """<!doctype html>
   .end-badge.later { background:transparent; color:var(--muted); border:1px solid var(--line); font-weight:600; }
   .end-badge.expired { background:var(--line); color:var(--muted); text-decoration:line-through; }
   .empty { padding:2rem 1rem; text-align:center; color:var(--muted); grid-column:1/-1; }
+
+  .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.6); backdrop-filter:blur(4px); z-index:100; display:flex; align-items:center; justify-content:center; padding:1rem; }
+  .modal { background:var(--card); color:var(--fg); border-radius:14px; max-width:450px; width:100%; max-height:85vh; overflow-y:auto; padding:1.2rem; box-shadow:0 8px 24px rgba(0,0,0,.3); position:relative; }
+  .modal-close { position:absolute; top:12px; right:12px; border:none; background:none; font-size:1.4rem; cursor:pointer; color:var(--muted); }
+  .hist-list { list-style:none; padding:0; margin:.8rem 0 0; }
+  .hist-item { display:flex; justify-content:space-between; padding:.5rem 0; border-bottom:1px solid var(--line); font-size:.85rem; }
 
   .top-btn { position:fixed; right:calc(.8rem + env(safe-area-inset-right,0px)); bottom:calc(.8rem + env(safe-area-inset-bottom,0px));
              width:2.9rem; height:2.9rem; border-radius:50%; border:none; background:var(--accent); color:var(--on-accent);
@@ -790,12 +785,6 @@ PAGE_TEMPLATE = """<!doctype html>
     .grid.c2 .card { border-radius:10px; }
     .grid.c2 .card figcaption { font-size:.72rem; padding:.4rem .45rem; }
     .grid.c2 .card-footer { padding:.35rem .45rem .5rem; font-size:.72rem; }
-    .grid.c2 .new-tag, .grid.c2 .clr-tag { font-size:.6rem; }
-    .grid.c2 .new-tag { top:5px; left:5px; }
-    .grid.c2 .tags-right { top:5px; right:5px; gap:3px; }
-    .grid.c2 .disc-tag { font-size:.7rem; padding:1px 5px; }
-    .grid.c2 .end-badge { font-size:.65rem; padding:2px 6px; }
-    .grid.c2 .repeat-tag { font-size:.6rem; padding:2px 5px; }
     .title { font-size:.95rem; }
     .meta { padding:0 .6rem; }
   }
@@ -861,6 +850,15 @@ PAGE_TEMPLATE = """<!doctype html>
 __CARDS__
 <p class="empty" id="no-match" hidden></p>
 </main>
+
+<div class="modal-overlay" id="sku-modal" hidden>
+  <div class="modal">
+    <button class="modal-close" id="modal-close">&times;</button>
+    <h3 id="modal-title" style="margin-top:0;">Price History</h3>
+    <div id="modal-body">Loading SKU history...</div>
+  </div>
+</div>
+
 <button class="top-btn" id="top-btn" type="button" aria-label="Back to top" title="Back to top">&#8593;</button>
 <script>
 (function () {
@@ -923,10 +921,53 @@ __CARDS__
   var colBtns = Array.prototype.slice.call(document.querySelectorAll('[data-cols]'));
   var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
   var checks = Array.prototype.slice.call(document.querySelectorAll('.shop-check'));
+  var modal = document.getElementById('sku-modal');
+  var modalClose = document.getElementById('modal-close');
+  var modalTitle = document.getElementById('modal-title');
+  var modalBody = document.getElementById('modal-body');
   var origOrder = cards.slice();
 
   var hashToUrl = {};
   cards.forEach(function (el) { hashToUrl[hashUrl(el.getAttribute('data-url'))] = el.getAttribute('data-url'); });
+
+  var priceDb = null;
+  function fetchPriceDb(cb) {
+    if (priceDb) return cb(priceDb);
+    fetch('state.json?t=' + Date.now()).then(function(res){ return res.json(); }).then(function(data){
+      priceDb = data.price_db || {};
+      cb(priceDb);
+    }).catch(function(){ cb({}); });
+  }
+
+  cards.forEach(function(card) {
+    var ident = card.getAttribute('data-ident');
+    var name = card.getAttribute('data-name');
+    var trigger = card.querySelector('figcaption');
+    var skuBadge = card.querySelector('.sku-badge');
+    function showModal() {
+      modalTitle.textContent = name;
+      modalBody.innerHTML = 'Loading SKU history...';
+      modal.hidden = false;
+      fetchPriceDb(function(db) {
+        var item = db[ident];
+        if (!item || !item.history || !item.history.length) {
+          modalBody.innerHTML = '<p>No historical price data recorded yet for this item.</p>';
+          return;
+        }
+        var html = '<p style="color:var(--muted);font-size:.85rem;">Recorded Price History:</p><ul class="hist-list">';
+        item.history.slice().reverse().forEach(function(h) {
+          html += '<li class="hist-item"><span><b>' + h.date + '</b></span><span>$' + Number(h.price).toFixed(2) + (h.pct ? ' (' + h.pct + '% off)' : '') + '</span></li>';
+        });
+        html += '</ul>';
+        modalBody.innerHTML = html;
+      });
+    }
+    if (trigger) trigger.addEventListener('click', showModal);
+    if (skuBadge) skuBadge.addEventListener('click', showModal);
+  });
+
+  modalClose.addEventListener('click', function() { modal.hidden = true; });
+  modal.addEventListener('click', function(e) { if (e.target === modal) modal.hidden = true; });
 
   var shoppingList = load(LIST_KEY, []);
   if (!Array.isArray(shoppingList)) shoppingList = [];
@@ -1088,7 +1129,6 @@ __CARDS__
     emptyMsg.hidden = shown !== 0;
   }
 
-  // ---- shared lists: open a link like  page.html#list=abc.def  to import items
   (function importShared() {
     var m = /[#&]list=([0-9a-z.]+)/.exec(location.hash || '');
     if (!m) return;
@@ -1319,7 +1359,8 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
         end = parse_end_date(i.label)
         pct = discount_pct(i.label)
         price = price_value(i.label)
-        is_repeat = item_ident(i) in seen_ids
+        ident = item_ident(i)
+        is_repeat = ident in seen_ids
 
         classes = ["card"]
         if is_new:
@@ -1331,6 +1372,7 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
         attrs = (f'data-t="{esc(i.label.lower(), quote=True)}" '
                  f'data-name="{esc(i.label, quote=True)}" '
                  f'data-url="{esc(i.url, quote=True)}" '
+                 f'data-ident="{esc(ident, quote=True)}" '
                  f'data-cat="{esc(i.category, quote=True)}" '
                  f'data-idx="{n}"')
         if end:
@@ -1349,14 +1391,15 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
         end_badge = '<span class="end-badge" hidden></span>' if end else ''
         repeat_tag = ('<span class="repeat-tag" title="Also on last week\'s post">&#128257; Repeat</span>'
                       if is_repeat else '')
-        foot_right = f'<span class="foot-right">{repeat_tag}{end_badge}</span>' if (repeat_tag or end_badge) else ''
+        sku_badge = f'<span class="sku-badge" title="View SKU history">#{esc(i.item_no)}</span>' if i.item_no else ''
+        foot_right = f'<span class="foot-right">{sku_badge}{repeat_tag}{end_badge}</span>'
 
         cards.append(f'''<figure class="{class_str}" {attrs}>
   {new_tag}{right_tags}
   <a href="{esc(i.url, quote=True)}" target="_blank" rel="noopener">
     <img src="{esc(i.url, quote=True)}" alt="{esc(i.label, quote=True)}" loading="lazy" referrerpolicy="no-referrer">
   </a>
-  <figcaption>{esc(i.label)}</figcaption>
+  <figcaption title="Click to view SKU price history">{esc(i.label)}</figcaption>
   <div class="card-footer">
     <label class="shop-label">
       <input type="checkbox" class="shop-check" data-url="{esc(i.url, quote=True)}"> Add to list
@@ -1382,6 +1425,7 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
 
 def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     scraper = make_scraper()
 
     today = datetime.now(ZoneInfo("America/Vancouver")).date()
@@ -1439,26 +1483,24 @@ def main() -> int:
     mode = "weekend" if is_weekend_mode else "flyer"
     valid_range = weekend_range if is_weekend_mode else monday_range
     stale = (not is_weekend_mode) and bool(monday_range) and monday_range[1] < today
-    print(f"Post valid: {valid_range[0]} to {valid_range[1]}" if valid_range else "Post valid: unknown")
-    if stale:
-        print("Newest Monday post has ended; waiting for this week's post.")
-
-    print(f"Mode: {'Weekend Exclusives' if is_weekend_mode else 'Monday Sales Post'}")
-    print(f"Location: {store_location}")
-    print(f"Total items: {len(target_items)} | New exclusives: {len(exclusive_urls)}")
 
     prev_state, state_ok = load_previous_state(scraper)
 
     seen_ids = previous_ids(prev_state, mode, target_url)
     ids = sorted({item_ident(i) for i in target_items})
     history = build_history(prev_state, mode, target_url, ids)
-    print(f"Repeats from previous post: {sum(1 for i in target_items if item_ident(i) in seen_ids)}")
-    print(f"Items with a discount %: {sum(1 for i in target_items if discount_pct(i.label))}")
+    price_db = update_price_db(prev_state, target_items, valid_range)
 
-    (OUTPUT_DIR / "index.html").write_text(
-        render_html(target_items, monday_url, weekend_url or monday_url, store_location,
-                    is_weekend_mode, exclusive_urls, seen_ids, valid_range, stale),
-        encoding="utf-8")
+    html_content = render_html(target_items, monday_url, weekend_url or monday_url, store_location,
+                               is_weekend_mode, exclusive_urls, seen_ids, valid_range, stale)
+
+    (OUTPUT_DIR / "index.html").write_text(html_content, encoding="utf-8")
+
+    # Archiving per post
+    slug = Path(urlparse(target_url).path).stem or "latest"
+    post_archive_dir = ARCHIVE_DIR / slug
+    post_archive_dir.mkdir(parents=True, exist_ok=True)
+    (post_archive_dir / "index.html").write_text(html_content, encoding="utf-8")
     
     (OUTPUT_DIR / "state.json").write_text(json.dumps({
         "weekend_url": weekend_url if is_weekend_mode else None,
@@ -1469,6 +1511,7 @@ def main() -> int:
         "exclusive_count": len(exclusive),
         "updated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "history": history,
+        "price_db": price_db,
     }, indent=2), encoding="utf-8")
 
     maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, target_items, exclusive)
