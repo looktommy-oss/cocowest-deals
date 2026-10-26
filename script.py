@@ -994,7 +994,6 @@ __CARDS__
       modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Loading live price history...</p>';
       modal.hidden = false;
 
-      // 1. Check if we have rich history locally (more than 1 entry)
       fetchPriceDb(function(db) {
         var item = db[ident];
         if (item && item.history && item.history.length > 1) {
@@ -1002,7 +1001,6 @@ __CARDS__
           return;
         }
 
-        // 2. Otherwise, fetch live via CORS proxy to grab the full history table
         if (!sku) {
           if (item && item.history) {
             renderHistoryList(item.history);
@@ -1016,8 +1014,8 @@ __CARDS__
         var proxyUrl = 'https://corsproxy.io/?' + encodeURIComponent(targetUrl);
 
         fetch(proxyUrl)
-          .then(function(res) { 
-            return res.text(); 
+          .then(function(res) {
+            return res.text();
           })
           .then(function(html) {
             console.log("Proxy HTML length:", html ? html.length : 0);
@@ -1044,6 +1042,24 @@ __CARDS__
                 }
               }
             });
+
+            if (records.length > 0) {
+              renderHistoryList(records);
+            } else if (item && item.history && item.history.length) {
+              renderHistoryList(item.history);
+            } else {
+              modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price table found on item page.</p>';
+            }
+          })
+          .catch(function(err) {
+            if (item && item.history) {
+              renderHistoryList(item.history);
+            } else {
+              modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Could not load live history.</p>';
+            }
+          });
+      });
+    }
 
             if (records.length > 0) {
               renderHistoryList(records);
