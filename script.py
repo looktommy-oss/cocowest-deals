@@ -3,7 +3,7 @@
 Scrape CocoWest.ca for Costco posts with robust category tagging and filtering,
 smart date-aware post discovery, Vancouver time stamps, shopping list, store location,
 clearance tags, end dates, discount % badges, sorting, list totals, emailable/shareable
-shopping list, repeat-item markers, permanent post archiving, and SKU price history.
+shopping list, repeat-item markers, permanent post archiving, and full CocoWest SKU price history scraping.
 
 Env overrides:
   MONDAY_URL, WEEKEND_URL      skip homepage discovery
@@ -539,8 +539,36 @@ def build_history(prev_state, mode, target_url, ids):
     }
     return history
 
-def update_price_db(prev_state, target_items, valid_range):
-    """Accumulates SKU price history across all runs in state.json."""
+def scrape_cocowest_item_history(scraper, item_no: str):
+    """Fetches full historical price table from cocowest.ca/item/<item_no>"""
+    url = f"{BASE_URL}item/{item_no}"
+    try:
+        html_text = fetch(scraper, url, retries=2)
+        soup = BeautifulSoup(html_text, "html.parser")
+        table = soup.find("table")
+        if not table:
+            return []
+        
+        records = []
+        rows = table.find_all("tr")
+        for tr in rows[1:]:  # skip header
+            tds = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
+            if len(tds) >= 4:
+                # Format: Posted (0), Savings (1), Expiry (2), Price (3)
+                p_str = tds[3].replace("$", "").replace(",", "").strip()
+                try:
+                    price = float(p_str)
+                    date_posted = tds[0].strip()
+                    records.append({"date": date_posted, "price": price, "pct": None})
+                except ValueError:
+                    continue
+        return records
+    except Exception as exc:
+        print(f"[history] Could not fetch history for SKU {item_no}: {exc!r}", file=sys.stderr)
+        return []
+
+def update_price_db(scraper, prev_state, target_items, valid_range):
+    """Accumulates SKU price history, deep-scraping cocowest.ca/item/<sku> when available."""
     db = dict(prev_state.get("price_db") or {})
     today_str = datetime.now(ZoneInfo("America/Vancouver")).strftime("%Y-%m-%d")
     date_label = valid_range[0].isoformat() if valid_range else today_str
@@ -549,10 +577,23 @@ def update_price_db(prev_state, target_items, valid_range):
         ident = item_ident(i)
         price = price_value(i.label)
         pct = discount_pct(i.label)
-        entry = db.get(ident, {"name": i.label, "item_no": i.item_no, "history": []})
+        entry = db.get(ident, {"name": i.label, "item_no": i.item_no, "history": [], "full_scraped": False})
+
+        # Deep scrape history from CocoWest item page if we haven't already
+        if i.item_no and not entry.get("full_scraped"):
+            print(f"[history] Deep scraping CocoWest price history for SKU {i.item_no}...")
+            remote_records = scrape_cocowest_item_history(scraper, i.item_no)
+            if remote_records:
+                # Merge remote records, avoiding duplicate dates
+                existing_dates = {h["date"] for h in entry["history"]}
+                for r in remote_records:
+                    if r["date"] not in existing_dates:
+                        entry["history"].append(r)
+                # Sort history chronologically
+                entry["history"].sort(key=lambda x: x["date"])
+            entry["full_scraped"] = True
 
         if price is not None:
-            # Prevent duplicate logs for the same post date
             hist = entry["history"]
             if not hist or hist[-1]["date"] != date_label:
                 hist.append({"date": date_label, "price": price, "pct": pct})
@@ -1489,7 +1530,7 @@ def main() -> int:
     seen_ids = previous_ids(prev_state, mode, target_url)
     ids = sorted({item_ident(i) for i in target_items})
     history = build_history(prev_state, mode, target_url, ids)
-    price_db = update_price_db(prev_state, target_items, valid_range)
+    price_db = update_price_db(scraper, prev_state, target_items, valid_range)
 
     html_content = render_html(target_items, monday_url, weekend_url or monday_url, store_location,
                                is_weekend_mode, exclusive_urls, seen_ids, valid_range, stale)
