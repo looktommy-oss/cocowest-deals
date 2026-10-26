@@ -1016,7 +1016,9 @@ __CARDS__
         var proxyUrl = 'https://corsproxy.io/?' + encodeURIComponent(targetUrl);
 
         fetch(proxyUrl)
-          .then(function(res) { return res.text(); }) // corsproxy returns raw HTML directly
+          .then(function(res) { 
+            return res.text(); 
+          })
           .then(function(html) {
             console.log("Proxy HTML length:", html ? html.length : 0);
             if (!html) throw new Error('Empty proxy response');
@@ -1042,6 +1044,22 @@ __CARDS__
                 }
               }
             });
+
+            if (records.length > 0) {
+              renderHistoryList(records);
+            } else if (item && item.history && item.history.length) {
+              renderHistoryList(item.history);
+            } else {
+              modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price table found on item page.</p>';
+            }
+          })
+          .catch(function(err) {
+            if (item && item.history) {
+              renderHistoryList(item.history);
+            } else {
+              modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Could not load live history.</p>';
+            }
+          });
 
             if (records.length > 0) {
               renderHistoryList(records);
