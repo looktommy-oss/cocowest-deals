@@ -1012,7 +1012,7 @@ __CARDS__
           return;
         }
 
-        var targetUrl = 'https://www.cocowest.ca/item/' + sku;
+        var targetUrl = 'https://www.cocowest.ca/?s=' + sku;
         var proxyUrl = 'https://api.allorigins.win/get?url=' + encodeURIComponent(targetUrl);
 
         fetch(proxyUrl)
