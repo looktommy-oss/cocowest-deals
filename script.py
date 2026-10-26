@@ -3,7 +3,7 @@
 Scrape CocoWest.ca for Costco posts with robust category tagging and filtering,
 smart date-aware post discovery, Vancouver time stamps, shopping list, store location,
 clearance tags, end dates, discount % badges, sorting, list totals, emailable/shareable
-shopping list, repeat-item markers, permanent post archiving, and on-demand browser SKU price history.
+shopping list, repeat-item markers, permanent post archiving, and clean state caching.
 
 Env overrides:
   MONDAY_URL, WEEKEND_URL      skip homepage discovery
@@ -540,7 +540,6 @@ def build_history(prev_state, mode, target_url, ids):
     return history
 
 def update_price_db(prev_state, target_items, valid_range):
-    """Stores basic current price points without scraping individual item pages during build."""
     db = dict(prev_state.get("price_db") or {})
     today_str = datetime.now(ZoneInfo("America/Vancouver")).strftime("%Y-%m-%d")
     date_label = valid_range[0].isoformat() if valid_range else today_str
@@ -864,7 +863,6 @@ __CARDS__
   var LIST_KEY = 'cocowest_shopping_list';
   var COLS_KEY = 'cocowest_cols';
   var HIDE_EXP_KEY = 'cocowest_hide_expired';
-  var CACHE_KEY = 'cocowest_sku_history_cache_v1';
   var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   var DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   var NL = String.fromCharCode(10);
@@ -930,86 +928,43 @@ __CARDS__
   var hashToUrl = {};
   cards.forEach(function (el) { hashToUrl[hashUrl(el.getAttribute('data-url'))] = el.getAttribute('data-url'); });
 
-  var skuCache = load(CACHE_KEY, {});
+  var priceDb = null;
+  function fetchPriceDb(cb) {
+    if (priceDb) return cb(priceDb);
+    fetch('state.json?t=' + Date.now()).then(function(res){ return res.json(); }).then(function(data){
+      priceDb = data.price_db || {};
+      cb(priceDb);
+    }).catch(function(){ cb({}); });
+  }
 
   cards.forEach(function(card) {
+    var ident = card.getAttribute('data-ident');
     var name = card.getAttribute('data-name');
     var sku = card.getAttribute('data-sku');
     var trigger = card.querySelector('figcaption');
     var skuBadge = card.querySelector('.sku-badge');
 
-    function renderHistoryList(historyArr) {
-      if (!historyArr || !historyArr.length) {
-        modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price data found for this item.</p>';
-        return;
-      }
-      var html = '<p style="color:var(--muted);font-size:.85rem;">Recorded Price History:</p><ul class="hist-list">';
-      historyArr.forEach(function(h) {
-        html += '<li class="hist-item"><span><b>' + h.date + '</b></span><span>$' + Number(h.price).toFixed(2) + (h.pct ? ' (' + h.pct + '% off)' : '') + '</span></li>';
-      });
-      html += '</ul>';
-      modalBody.innerHTML = html;
-    }
-
     function showModal() {
       modalTitle.textContent = name;
+      modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Loading recorded price history...</p>';
       modal.hidden = false;
 
-      if (!sku) {
-        modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No SKU available for this item.</p>';
-        return;
-      }
-
-      if (skuCache[sku] && skuCache[sku].length > 0) {
-        renderHistoryList(skuCache[sku]);
-        return;
-      }
-
-      modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Fetching history on demand for SKU #' + sku + '...</p>';
-
-      var targetUrl = 'https://www.cocowest.ca/item/' + sku;
-      // Using AllOrigins or a reliable cors proxy that handles HTML cleanly
-      var proxyUrl = 'https://api.allorigins.win/get?url=' + encodeURIComponent(targetUrl);
-
-      fetch(proxyUrl)
-        .then(function(res) { return res.json(); })
-        .then(function(data) {
-          var htmlText = data.contents;
-          var parser = new DOMParser();
-          var doc = parser.parseFromString(htmlText, 'text/html');
-          var rows = Array.prototype.slice.call(doc.querySelectorAll('tr'));
-          var records = [];
-
-          rows.forEach(function(tr) {
-            var tds = Array.prototype.slice.call(tr.querySelectorAll('td, th')).map(function(td) {
-              return td.textContent.trim();
-            });
-            if (tds.length >= 4) {
-              var dateMatch = /\b(\d{4}-\d{2}-\d{2})\b/.exec(tds[0]);
-              if (dateMatch) {
-                var datePosted = dateMatch[1];
-                var pMatch = /\$\s?(\d[\d,]*)\.(\d{2})\b/.exec(tds[3]);
-                if (pMatch) {
-                  var price = parseFloat(pMatch[1].replace(',', '') + '.' + pMatch[2]);
-                  if (!isNaN(price)) {
-                    records.push({ date: datePosted, price: price, pct: null });
-                  }
-                }
-              }
-            }
-          });
-
-          if (records.length > 0) {
-            skuCache[sku] = records;
-            save(CACHE_KEY, skuCache);
-            renderHistoryList(records);
-          } else {
-            modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price table found for SKU #' + sku + '.</p>';
-          }
-        })
-        .catch(function(err) {
-          modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Could not fetch price history.</p>';
+      fetchPriceDb(function(db) {
+        var item = db[ident];
+        var historyArr = item && item.history ? item.history : [];
+        
+        if (!historyArr.length) {
+          modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price data recorded yet for this item.</p>' +
+                                (sku ? '<p style="font-size:.80rem;margin-top:.4rem;"><a href="https://www.cocowest.ca/item/' + sku + '" target="_blank" rel="noopener" style="color:var(--accent);">View on CocoWest &rarr;</a></p>' : '');
+          return;
+        }
+        var html = '<p style="color:var(--muted);font-size:.85rem;">Recorded Price History:</p><ul class="hist-list">';
+        historyArr.slice().reverse().forEach(function(h) {
+          html += '<li class="hist-item"><span><b>' + h.date + '</b></span><span>$' + Number(h.price).toFixed(2) + (h.pct ? ' (' + h.pct + '% off)' : '') + '</span></li>';
         });
+        html += '</ul>';
+        modalBody.innerHTML = html;
+      });
     }
 
     if (trigger) trigger.addEventListener('click', showModal);
@@ -1233,7 +1188,7 @@ __CARDS__
     if (!items.length) return;
     var sum = 0;
     items.forEach(function (el) { var p = num(el, 'data-price'); if (p !== null) sum += p; });
-    var head = 'My Costco shopping list (' + items.length + ' item' + (items.length === 1 ? '' : 's') + '):' + NL + NL +
+    var head = 'My Costco shopping list (' + items.length + ' item' + (items.length === 1 ? '' : 's' ) + '):' + NL + NL +
                'Open it on the site: ' + shareUrl() + NL + NL;
     var tail = NL + 'Total: $' + sum.toFixed(2);
     var lines = [];
