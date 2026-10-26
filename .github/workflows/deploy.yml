@@ -8,6 +8,8 @@ on:
     # Mon 4pm, 6pm, 8pm Vancouver = Tuesday UTC 00:00, 02:00, 04:00
     # Tue 10am, 2pm Vancouver (fallback if the Monday post was late or holiday-shifted)
     - cron: '0 0,2,4,18,22 * * 2'
+    # Tue 4pm, 6pm, 8pm Vancouver = Wednesday UTC 00:00, 02:00, 04:00
+    - cron: '0 0,2,4 * * 3'
     # Fri 2pm Vancouver
     - cron: '0 22 * * 5'
     # Fri 4pm, 7pm Vancouver = Saturday UTC 00:00, 03:00
