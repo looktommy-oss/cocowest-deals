@@ -19,9 +19,10 @@ import smtplib
 import ssl
 import sys
 import time
+from datetime import timedelta
 from collections import Counter
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 from difflib import SequenceMatcher
 from email.message import EmailMessage
@@ -43,7 +44,7 @@ if SITE_URL and not SITE_URL.endswith("/"):
     SITE_URL += "/"
 STATE_URL = SITE_URL + "state.json" if SITE_URL else ""
 
-WEEKEND_RE = re.compile(os.getenv("WEEKEND_RE", r"weekend"), re.I)
+WEEKEND_RE = re.compile(os.getenv("WEEKEND_RE", r"weekend[-_\s]*(?:sales[-_\s]*)?update"), re.I)
 IGNORE_RE = re.compile(r"(seasonal|electronics|food[-_\s]review|review|recall|contest|clothing|executive|black[-_\s]friday|boxing[-_\s]day)", re.I)
 
 FUZZY_THRESHOLD = 0.92
@@ -93,6 +94,76 @@ def is_post_link(href: str) -> bool:
         return False
     return not re.search(r"\.(jpe?g|png|gif|webp|pdf|xml)$", path, re.I)
 
+# Post titles carry their valid dates, e.g. "Costco Sale Items for October 23-25, 2026"
+# or "October 26-November 1, 2026". These helpers read those dates so the script knows
+# whether a post is still current, instead of just trusting whatever is newest on the page.
+SALES_POST_RE = re.compile(r"(costco[-_\s]+flyer|sale[-_\s]+items)", re.I)
+
+_MONTH_NAMES = ("january", "february", "march", "april", "may", "june", "july", "august",
+                "september", "october", "november", "december")
+_MONTH_ALIASES = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7, "aug": 8,
+                  "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12}
+_MONTH_PAT = "|".join(_MONTH_NAMES + tuple(sorted(_MONTH_ALIASES, key=len, reverse=True)))
+RANGE_RE = re.compile(
+    rf"\b({_MONTH_PAT})\.?\s+(\d{{1,2}})(?:\s*[-–—]\s*|\s+)(?:({_MONTH_PAT})\.?\s+)?(\d{{1,2}})\b[,\s]+(\d{{4}})",
+    re.I)
+
+def _month_num(name: str):
+    n = (name or "").lower().rstrip(".")
+    if n in _MONTH_NAMES:
+        return _MONTH_NAMES.index(n) + 1
+    return _MONTH_ALIASES.get(n)
+
+def parse_range(text: str):
+    """Pull a date range like 'October 23-25, 2026' out of a title or URL slug.
+    Returns (start_date, end_date) or None when no range is found."""
+    m = RANGE_RE.search(text or "")
+    if not m:
+        return None
+    m1, d1, m2, d2, year = m.groups()
+    mo1 = _month_num(m1)
+    mo2 = _month_num(m2) if m2 else mo1
+    y = int(year)
+    try:
+        end = date(y, mo2, int(d2))
+        start = date(y if mo2 >= mo1 else y - 1, mo1, int(d1))
+    except (TypeError, ValueError):
+        return None
+    return (start, end) if start <= end else None
+
+def range_from_html(post_html: str):
+    """Read the date range from a fetched post's heading / title."""
+    soup = BeautifulSoup(post_html, "html.parser")
+    texts = []
+    h1 = soup.find("h1")
+    if h1:
+        texts.append(h1.get_text(" ", strip=True))
+    if soup.title and soup.title.string:
+        texts.append(soup.title.string)
+    og = soup.find("meta", property="og:title")
+    if og and og.get("content"):
+        texts.append(og["content"])
+    for t in texts:
+        r = parse_range(t)
+        if r:
+            return r
+    return None
+
+def fmt_range(rng) -> str:
+    """Short HTML-ready label such as 'Oct 23 &ndash; 25' or 'Oct 26 &ndash; Nov 1'."""
+    s, e = rng
+    left = f"{s.strftime('%b')} {s.day}"
+    same_month = e.month == s.month and e.year == s.year
+    right = f"{e.day}" if same_month else f"{e.strftime('%b')} {e.day}"
+    return f"{left} &ndash; {right}"
+
+
+def weekend_over(rng, forced: bool, today) -> bool:
+    """True when the weekend post's dates have passed (unless a URL was forced by env)."""
+    # Keep weekend post valid through Monday until new post drops
+    effective_today = today - timedelta(days=1) if today.weekday() == 0 else today
+    return (not forced) and bool(rng) and rng[1] < effective_today
+
 def discover_posts(home_html: str):
     soup = BeautifulSoup(home_html, "html.parser")
     seen = set()
@@ -107,28 +178,49 @@ def discover_posts(home_html: str):
                          a.get("aria-label", ""), urlparse(href).path.replace("-", " ")])
         all_posts.append((href, blob))
 
-    weekend_url = os.getenv("WEEKEND_URL")
-    monday_url = os.getenv("MONDAY_URL")
+    weekend_env = os.getenv("WEEKEND_URL")
+    monday_env = os.getenv("MONDAY_URL")
 
-    if not weekend_url:
-        for href, blob in all_posts:
-            if WEEKEND_RE.search(blob):
-                weekend_url = href
-                break
+    entries = [{"href": h, "blob": b, "order": n, "range": parse_range(b)}
+               for n, (h, b) in enumerate(all_posts)]
 
-    if not monday_url:
-        for href, blob in all_posts:
-            if href == weekend_url:
-                continue
-            if IGNORE_RE.search(blob):
-                continue
-            monday_url = href
-            break
+    def newest(cands):
+        """Latest end date wins; ties (or no dates) fall back to page order."""
+        dated = [c for c in cands if c["range"]]
+        if dated:
+            return max(dated, key=lambda c: (c["range"][1], -c["order"]))
+        return cands[0] if cands else None
 
-    if not monday_url and all_posts:
-        monday_url = all_posts[0][0]
+    # Weekend update: a "Weekend Update" post, newest by its dates.
+    weekend_pick = newest([e for e in entries if WEEKEND_RE.search(e["blob"])])
+    weekend_url = weekend_env or (weekend_pick["href"] if weekend_pick else None)
+    weekend_range = None
+    if weekend_pick and weekend_pick["href"] == weekend_url:
+        weekend_range = weekend_pick["range"]
 
-    return monday_url, weekend_url
+    # Monday post: must look like a flyer / sale-items post with dates in its title,
+    # so aisle posts, reviews and other new post types are never mistaken for it.
+    def is_candidate(e):
+        return (e["href"] != weekend_url
+                and not WEEKEND_RE.search(e["blob"])
+                and not IGNORE_RE.search(e["blob"]))
+
+    monday_pick = newest([e for e in entries
+                          if is_candidate(e) and e["range"] and SALES_POST_RE.search(e["blob"])])
+    if not monday_pick:
+        # Fallback to the old behaviour if the site ever changes its title style.
+        monday_pick = next((e for e in entries if is_candidate(e)), None)
+
+    if monday_env:
+        monday_url, monday_range = monday_env, None
+    elif monday_pick:
+        monday_url, monday_range = monday_pick["href"], monday_pick["range"]
+    elif all_posts:
+        monday_url, monday_range = all_posts[0][0], None
+    else:
+        monday_url, monday_range = None, None
+
+    return monday_url, weekend_url, {"monday": monday_range, "weekend": weekend_range}
 
 IMG_URL_RE = re.compile(
     r"^(https?:)?//\S+?\.(jpe?g|png|webp|gif|avif)(\?\S*)?$|^/\S+?\.(jpe?g|png|webp|gif|avif)(\?\S*)?$",
@@ -761,6 +853,7 @@ PAGE_TEMPLATE = """<!doctype html>
 </div>
 <div class="meta">
   📍 Store Location: <b>__LOCATION__</b><br>
+  __VALID_LINE__
   Showing <b id="shown-count">__TOTAL__</b> of <b>__TOTAL__</b> items &middot; updated __STAMP__<br>
   Source: <a href="__SOURCE_URL__">__SOURCE_NAME__</a>
 </div>
@@ -1033,7 +1126,7 @@ __CARDS__
   }
 
   function itemLine(el) {
-    var name = (el.getAttribute('data-name') || '').replace(/\s+/g, ' ').trim();
+    var name = (el.getAttribute('data-name') || '').replace(/ +/g, ' ').trim();
     if (name.length > 100) name = name.slice(0, 97) + '...';
     var p = num(el, 'data-price');
     var d = num(el, 'data-disc');
@@ -1183,7 +1276,7 @@ __CARDS__
 </html>"""
 
 def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
-                exclusive_urls=None, seen_ids=None) -> str:
+                exclusive_urls=None, seen_ids=None, valid_range=None, stale=False) -> str:
     stamp = datetime.now(ZoneInfo("America/Vancouver")).strftime("%b %d, %I:%M %p")
     esc = html.escape
     exclusive_urls = exclusive_urls or set()
@@ -1192,6 +1285,14 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
     clr_count = sum(1 for i in items if is_clearance(i.label))
     new_count = len(exclusive_urls)
     repeat_count = sum(1 for i in items if item_ident(i) in seen_ids)
+
+    if valid_range and stale:
+        valid_line = (f"&#9203; <b>Waiting for this week's post</b> &ndash; showing the one for "
+                      f"{fmt_range(valid_range)} (ended)<br>")
+    elif valid_range:
+        valid_line = f"&#128197; Valid <b>{fmt_range(valid_range)}</b><br>"
+    else:
+        valid_line = ""
 
     if is_weekend_mode:
         page_title = "Costco Weekend Deals"
@@ -1273,6 +1374,7 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
             .replace("__NEW_BTN__", new_btn_html)
             .replace("__REPEAT_BTN__", repeat_btn_html)
             .replace("__LOCATION__", esc(store_location or "Metro Vancouver Area"))
+            .replace("__VALID_LINE__", valid_line)
             .replace("__STAMP__", stamp)
             .replace("__SOURCE_URL__", esc(source_url, quote=True))
             .replace("__SOURCE_NAME__", source_name)
@@ -1282,10 +1384,13 @@ def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     scraper = make_scraper()
 
+    today = datetime.now(ZoneInfo("America/Vancouver")).date()
+    weekend_forced = bool(os.getenv("WEEKEND_URL"))
+    ranges = {}
     monday_url, weekend_url = os.getenv("MONDAY_URL"), os.getenv("WEEKEND_URL")
     if not monday_url:
         home = fetch(scraper, BASE_URL)
-        monday_url, weekend_url = discover_posts(home)
+        monday_url, weekend_url, ranges = discover_posts(home)
 
     if not monday_url:
         print("ERROR: could not find Monday/Sales post.", file=sys.stderr)
@@ -1293,6 +1398,7 @@ def main() -> int:
 
     print(f"Base Flyer/Sales Post: {monday_url}")
     monday_html = fetch(scraper, monday_url)
+    monday_range = ranges.get("monday") or range_from_html(monday_html)
     monday_items = extract_items(monday_html, monday_url)
 
     if not monday_items:
@@ -1301,7 +1407,11 @@ def main() -> int:
 
     store_location = extract_location(monday_html)
 
+    weekend_range = ranges.get("weekend")
     is_weekend_mode = bool(weekend_url)
+    if is_weekend_mode and weekend_over(weekend_range, weekend_forced, today):
+        print(f"Weekend post ended {weekend_range[1]}; using the Monday post instead.")
+        is_weekend_mode = False
     weekend_items = []
     exclusive = []
     exclusive_urls = set()
@@ -1310,7 +1420,12 @@ def main() -> int:
         print(f"Weekend Update: {weekend_url}")
         time.sleep(random.uniform(1, 3))
         weekend_html = fetch(scraper, weekend_url)
-        weekend_items = extract_items(weekend_html, weekend_url)
+        weekend_range = weekend_range or range_from_html(weekend_html)
+        if weekend_over(weekend_range, weekend_forced, today):
+            print(f"Weekend post ended {weekend_range[1]}; using the Monday post instead.")
+            weekend_items = []
+        else:
+            weekend_items = extract_items(weekend_html, weekend_url)
         
         if weekend_items:
             store_location = extract_location(weekend_html) or store_location
@@ -1322,6 +1437,11 @@ def main() -> int:
     target_items = weekend_items if is_weekend_mode else monday_items
     target_url = weekend_url if is_weekend_mode else monday_url
     mode = "weekend" if is_weekend_mode else "flyer"
+    valid_range = weekend_range if is_weekend_mode else monday_range
+    stale = (not is_weekend_mode) and bool(monday_range) and monday_range[1] < today
+    print(f"Post valid: {valid_range[0]} to {valid_range[1]}" if valid_range else "Post valid: unknown")
+    if stale:
+        print("Newest Monday post has ended; waiting for this week's post.")
 
     print(f"Mode: {'Weekend Exclusives' if is_weekend_mode else 'Monday Sales Post'}")
     print(f"Location: {store_location}")
@@ -1337,13 +1457,14 @@ def main() -> int:
 
     (OUTPUT_DIR / "index.html").write_text(
         render_html(target_items, monday_url, weekend_url or monday_url, store_location,
-                    is_weekend_mode, exclusive_urls, seen_ids),
+                    is_weekend_mode, exclusive_urls, seen_ids, valid_range, stale),
         encoding="utf-8")
     
     (OUTPUT_DIR / "state.json").write_text(json.dumps({
-        "weekend_url": weekend_url,
+        "weekend_url": weekend_url if is_weekend_mode else None,
         "flyer_url": monday_url,
         "mode": mode,
+        "valid": [valid_range[0].isoformat(), valid_range[1].isoformat()] if valid_range else None,
         "total_count": len(target_items),
         "exclusive_count": len(exclusive),
         "updated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
