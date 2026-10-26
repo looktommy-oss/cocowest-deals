@@ -540,7 +540,7 @@ def build_history(prev_state, mode, target_url, ids):
     return history
 
 def update_price_db(prev_state, target_items, valid_range):
-    """Accumulates SKU price history cleanly without heavy backend scraping."""
+    """Accumulates SKU price history cleanly into state.json on every run."""
     db = dict(prev_state.get("price_db") or {})
     today_str = datetime.now(ZoneInfo("America/Vancouver")).strftime("%Y-%m-%d")
     date_label = valid_range[0].isoformat() if valid_range else today_str
@@ -553,6 +553,7 @@ def update_price_db(prev_state, target_items, valid_range):
 
         if price is not None:
             hist = entry["history"]
+            # Avoid duplicate entries for the exact same date
             if not hist or hist[-1]["date"] != date_label:
                 hist.append({"date": date_label, "price": price, "pct": pct})
         db[ident] = entry
@@ -941,87 +942,26 @@ __CARDS__
   cards.forEach(function(card) {
     var ident = card.getAttribute('data-ident');
     var name = card.getAttribute('data-name');
-    var sku = card.getAttribute('data-sku');
     var trigger = card.querySelector('figcaption');
     var skuBadge = card.querySelector('.sku-badge');
 
-    function renderHistoryList(historyArr) {
-      if (!historyArr || !historyArr.length) {
-        modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price data found.</p>';
-        return;
-      }
-      var html = '<p style="color:var(--muted);font-size:.85rem;">Recorded Price History:</p><ul class="hist-list">';
-      historyArr.slice().reverse().forEach(function(h) {
-        html += '<li class="hist-item"><span><b>' + h.date + '</b></span><span>$' + Number(h.price).toFixed(2) + (h.pct ? ' (' + h.pct + '% off)' : '') + '</span></li>';
-      });
-      html += '</ul>';
-      modalBody.innerHTML = html;
-    }
-
     function showModal() {
       modalTitle.textContent = name;
-      modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Loading live price history...</p>';
+      modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Loading recorded price history...</p>';
       modal.hidden = false;
 
       fetchPriceDb(function(db) {
         var item = db[ident];
-        if (item && item.history && item.history.length > 1) {
-          renderHistoryList(item.history);
+        if (!item || !item.history || !item.history.length) {
+          modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price data recorded yet for this item.</p>';
           return;
         }
-
-        if (!sku) {
-          if (item && item.history) {
-            renderHistoryList(item.history);
-          } else {
-            modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No SKU available to look up history.</p>';
-          }
-          return;
-        }
-
-        var targetUrl = 'https://www.cocowest.ca/?s=' + sku;
-        var proxyUrl = 'https://corsproxy.io/?' + encodeURIComponent(targetUrl);
-
-        fetch(proxyUrl)
-          .then(function(res) {
-            return res.text();
-          })
-          .then(function(html) {
-            var parser = new DOMParser();
-            var doc = parser.parseFromString(html, 'text/html');
-            var rows = Array.prototype.slice.call(doc.querySelectorAll('tr'));
-            var records = [];
-            rows.forEach(function(tr) {
-              var tds = Array.prototype.slice.call(tr.querySelectorAll('td, th')).map(function(td) {
-                return td.textContent.trim();
-              });
-              if (tds.length >= 4) {
-                var datePosted = tds[0];
-                var pStr = tds[3].replace('$', '').replace(',', '').trim();
-                if (/^\d{4}-\d{2}-\d{2}$/.test(datePosted)) {
-                  var price = parseFloat(pStr);
-                  if (!isNaN(price)) {
-                    records.push({ date: datePosted, price: price, pct: null });
-                  }
-                }
-              }
-            });
-
-            if (records.length > 0) {
-              renderHistoryList(records);
-            } else if (item && item.history && item.history.length) {
-              renderHistoryList(item.history);
-            } else {
-              modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price table found on item page.</p>';
-            }
-          })
-          .catch(function(err) {
-            if (item && item.history) {
-              renderHistoryList(item.history);
-            } else {
-              modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Could not load live history.</p>';
-            }
-          });
+        var html = '<p style="color:var(--muted);font-size:.85rem;">Recorded Price History:</p><ul class="hist-list">';
+        item.history.slice().reverse().forEach(function(h) {
+          html += '<li class="hist-item"><span><b>' + h.date + '</b></span><span>$' + Number(h.price).toFixed(2) + (h.pct ? ' (' + h.pct + '% off)' : '') + '</span></li>';
+        });
+        html += '</ul>';
+        modalBody.innerHTML = html;
       });
     }
 
@@ -1246,7 +1186,7 @@ __CARDS__
     if (!items.length) return;
     var sum = 0;
     items.forEach(function (el) { var p = num(el, 'data-price'); if (p !== null) sum += p; });
-    var head = 'My Costco shopping list (' + items.length + ' item' + (items.length === 1 ? '' : 's' ) + '):' + NL + NL +
+    var head = 'My Costco shopping list (' + items.length + ' item' + (items.length === 1 ? '' : 's') + '):' + NL + NL +
                'Open it on the site: ' + shareUrl() + NL + NL;
     var tail = NL + 'Total: $' + sum.toFixed(2);
     var lines = [];
@@ -1553,6 +1493,8 @@ def main() -> int:
     seen_ids = previous_ids(prev_state, mode, target_url)
     ids = sorted({item_ident(i) for i in target_items})
     history = build_history(prev_state, mode, target_url, ids)
+    
+    # Accumulate prices into state.json cleanly during python build
     price_db = update_price_db(prev_state, target_items, valid_range)
 
     html_content = render_html(target_items, monday_url, weekend_url or monday_url, store_location,
