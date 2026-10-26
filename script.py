@@ -994,7 +994,7 @@ __CARDS__
       modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Loading live price history...</p>';
       modal.hidden = false;
 
-      // 1. First check if we already have multi-row history in state.json
+      // 1. Check if we have rich history locally (more than 1 entry)
       fetchPriceDb(function(db) {
         var item = db[ident];
         if (item && item.history && item.history.length > 1) {
@@ -1002,7 +1002,7 @@ __CARDS__
           return;
         }
 
-        // 2. If not, fetch the live item page via public CORS proxy on demand
+        // 2. Otherwise, fetch live via CORS proxy to grab the full history table
         if (!sku) {
           if (item && item.history) {
             renderHistoryList(item.history);
@@ -1018,12 +1018,13 @@ __CARDS__
         fetch(proxyUrl)
           .then(function(res) { return res.json(); })
           .then(function(data) {
+            console.log("Proxy HTML length:", data && data.contents ? data.contents.length : 0); // <-- Add this
             if (!data || !data.contents) throw new Error('Empty proxy response');
 
             var parser = new DOMParser();
             var doc = parser.parseFromString(data.contents, 'text/html');
             var rows = Array.prototype.slice.call(doc.querySelectorAll('tr'));
-            var records = [];
+            console.log("Found table rows:", rows.length); // <-- And add this
 
             rows.forEach(function(tr) {
               var tds = Array.prototype.slice.call(tr.querySelectorAll('td, th')).map(function(td) {
