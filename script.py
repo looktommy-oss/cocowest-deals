@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Scrape CocoWest.ca for Costco posts with robust category tagging and filtering,
-smart date-aware post discovery, Vancouver time stamps, shopping list, store location, clearance tags, and end dates.
+smart date-aware post discovery, Vancouver time stamps, shopping list, store location,
+clearance tags, end dates, discount % badges, sorting, list totals, emailable/shareable
+shopping list, repeat-item markers and a richer email digest.
 
 Env overrides:
   MONDAY_URL, WEEKEND_URL      skip homepage discovery
@@ -370,20 +372,73 @@ def find_exclusive_userscript(weekend_items, monday_items):
     return [i for i in weekend_items if i.us_key and i.us_key not in mon]
 
 
-# ------------------------------------------------- price + end-date parsing
+# ------------------------------------------- price, discount + end-date parsing
 
 PRICE_RE = re.compile(r"\$\s?(\d[\d,]*)\.(\d{2})\b")
 END_RE = re.compile(
     r"(?:EXPIRES|ENDS|VALID\s+(?:UNTIL|THROUGH|THRU))\s+(?:ON\s+)?(\d{4}-\d{2}-\d{2})", re.I)
+
+# Savings wording. These are best guesses at how the labels are phrased:
+#   "SAVE $5.00", "$5 OFF", "$5.00 instant savings"   -> amount saved
+#   "REG $14.99", "WAS $14.99", "REGULAR PRICE $14.99" -> original price
+#   "25% OFF"                                          -> explicit percentage
+MONEY = r"\$\s?(\d[\d,]*(?:\.\d{1,2})?)"
+SAVE_RE = re.compile(r"\b(?:you\s+)?(?:instant\s+)?(?:save|savings?)\s*(?:of\s*)?:?\s*" + MONEY, re.I)
+OFF_RE = re.compile(MONEY + r"\s*(?:off|instant\s+savings?|savings?|discount)\b", re.I)
+REG_RE = re.compile(r"\b(?:reg(?:ular)?|was|orig(?:inal)?)\.?\s*(?:price)?\s*:?\s*" + MONEY, re.I)
+PCT_OFF_RE = re.compile(r"\b(\d{1,2})\s*%\s*off\b", re.I)
 
 def parse_price(label: str):
     text = re.sub(r"\([^)]*\)", " ", label or "")
     found = PRICE_RE.findall(text)
     return found[-1] if found else None
 
+def strip_savings(label: str) -> str:
+    """Remove 'save $X' / '$X off' / 'reg $X' phrases so they aren't mistaken for the sale price."""
+    text = label or ""
+    for rx in (SAVE_RE, OFF_RE, REG_RE):
+        text = rx.sub(" ", text)
+    return text
+
+def price_value(label: str):
+    p = parse_price(strip_savings(label))
+    if not p:
+        return None
+    return float(f"{p[0].replace(',', '')}.{p[1]}")
+
 def is_clearance(label: str) -> bool:
-    p = parse_price(label)
+    p = parse_price(strip_savings(label))
     return bool(p) and p[1] == "97"
+
+def _money(s: str) -> float:
+    return float(s.replace(",", ""))
+
+def _sane_pct(pct):
+    return pct if pct is not None and 1 <= pct <= 90 else None
+
+def discount_pct(label: str):
+    """Return an int percentage off, or None when it can't be worked out reliably."""
+    label = label or ""
+    m = PCT_OFF_RE.search(label)
+    if m:
+        return _sane_pct(int(m.group(1)))
+
+    sale = price_value(label)
+    if not sale:
+        return None
+
+    m = REG_RE.search(label)
+    if m:
+        reg = _money(m.group(1))
+        if reg > sale:
+            return _sane_pct(round((reg - sale) / reg * 100))
+
+    m = SAVE_RE.search(label) or OFF_RE.search(label)
+    if m:
+        save = _money(m.group(1))
+        if save > 0:
+            return _sane_pct(round(save / (sale + save) * 100))
+    return None
 
 def parse_end_date(label: str) -> str:
     m = END_RE.search(label or "")
@@ -397,6 +452,29 @@ def parse_end_date(label: str) -> str:
 
 
 # --------------------------------------------------------- state + alerting
+
+def item_ident(it: Item) -> str:
+    """Stable identity used to recognise the same product across weekly posts."""
+    return f"no:{it.item_no}" if it.item_no else (it.file_key or it.alt_key or it.url)
+
+def _previous_entry(prev_state, mode, target_url):
+    """The 'previous post' record for this mode: the last post that is NOT the current one."""
+    entry = (prev_state.get("history") or {}).get(mode) or {}
+    cur = entry.get("current") or {}
+    if cur.get("url") == target_url:
+        return entry.get("previous") or {}
+    return cur
+
+def previous_ids(prev_state, mode, target_url):
+    return set(_previous_entry(prev_state, mode, target_url).get("ids") or [])
+
+def build_history(prev_state, mode, target_url, ids):
+    history = dict(prev_state.get("history") or {})
+    history[mode] = {
+        "current": {"url": target_url, "ids": ids},
+        "previous": _previous_entry(prev_state, mode, target_url),
+    }
+    return history
 
 def load_previous_state(scraper):
     if not STATE_URL:
@@ -439,7 +517,41 @@ def send_email(subject: str, body: str) -> bool:
         print(f"[email] failed: {exc!r}", file=sys.stderr)
     return False
 
-def maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, items_count, exclusive_count):
+def digest_line(it: Item) -> str:
+    pct = discount_pct(it.label)
+    price = price_value(it.label)
+    bits = []
+    if pct:
+        bits.append(f"{pct}% off")
+    if price is not None:
+        bits.append(f"${price:.2f}")
+    name = re.sub(r"\s+", " ", it.label).strip()[:90]
+    return f"- {name}" + (f" ({', '.join(bits)})" if bits else "")
+
+def build_digest(items, exclusive, is_weekend_mode):
+    sections = []
+
+    with_disc = sorted((i for i in items if discount_pct(i.label)),
+                       key=lambda i: discount_pct(i.label), reverse=True)
+    if with_disc:
+        sections.append("BIGGEST DISCOUNTS\n" + "\n".join(digest_line(i) for i in with_disc[:5]))
+
+    if is_weekend_mode and exclusive:
+        top_new = sorted(exclusive, key=lambda i: discount_pct(i.label) or 0, reverse=True)[:5]
+        sections.append("NEW THIS WEEKEND\n" + "\n".join(digest_line(i) for i in top_new))
+
+    clearance = [i for i in items if is_clearance(i.label)]
+    if clearance:
+        shown = clearance[:8]
+        extra = len(clearance) - len(shown)
+        text = "CLEARANCE FINDS (.97 prices)\n" + "\n".join(digest_line(i) for i in shown)
+        if extra > 0:
+            text += f"\n...and {extra} more on the site"
+        sections.append(text)
+
+    return "\n\n".join(sections)
+
+def maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, items, exclusive):
     force = os.getenv("FORCE_NOTIFY") == "1"
     key = "weekend_url" if is_weekend_mode else "flyer_url"
     is_new_post = target_url != prev_state.get(key)
@@ -447,13 +559,24 @@ def maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, items_count,
         print("[email] not sending notification")
         return
 
+    items_count = len(items)
+    exclusive_count = len(exclusive)
     mode_name = "Weekend Exclusives" if is_weekend_mode else "Monday Sales Post"
     lines = [
         f"CocoWest {mode_name} updated: {items_count} items found.",
         f"Browse them: {SITE_URL or '(site URL unknown)'}",
-        f"Post URL: {target_url}"
+        f"Post URL: {target_url}",
     ]
-    subj = f"CocoWest: {exclusive_count} new weekend deals" if is_weekend_mode else f"CocoWest: Monday Sales Post ({items_count} items)"
+    digest = build_digest(items, exclusive, is_weekend_mode)
+    if digest:
+        lines += ["", digest]
+
+    best = max((discount_pct(i.label) or 0 for i in items), default=0)
+    best_txt = f" | top deal {best}% off" if best else ""
+    if is_weekend_mode:
+        subj = f"CocoWest: {exclusive_count} new weekend deals{best_txt}"
+    else:
+        subj = f"CocoWest: Monday Sales Post ({items_count} items){best_txt}"
     send_email(subj, "\n".join(lines))
 
 
@@ -481,7 +604,7 @@ PAGE_TEMPLATE = """<!doctype html>
   [hidden] { display:none !important; }
   html { -webkit-text-size-adjust:100%; }
   body { margin:0; background:var(--bg); color:var(--fg); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-         padding-bottom:3rem; padding-left:env(safe-area-inset-left,0px); padding-right:env(safe-area-inset-right,0px); }
+         padding-bottom:4.5rem; padding-left:env(safe-area-inset-left,0px); padding-right:env(safe-area-inset-right,0px); }
   
   .sticky-header {
     position: sticky;
@@ -509,10 +632,15 @@ PAGE_TEMPLATE = """<!doctype html>
   .chip.icon-only { padding:.25rem .5rem; font-size:.95rem; }
   .chip.active { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
   .chip.danger { color:var(--danger); border-color:var(--danger); }
+  .sort-select { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:999px;
+                 padding:.25rem .5rem; font-size:.8rem; font-weight:600; max-width:100%; }
   .cols-toggle { display:none; align-items:center; gap:.35rem; margin-left:auto; font-size:.8rem; color:var(--muted); }
   .seg { display:inline-flex; border:1px solid var(--line); border-radius:999px; overflow:hidden; }
   .seg button { border:none; background:var(--card); color:var(--fg); padding:.3rem .7rem; font-size:.85rem; font-weight:700; cursor:pointer; }
   .seg button.active { background:var(--accent); color:var(--on-accent); }
+
+  .list-bar { max-width:1200px; margin:0 auto; padding:0 .8rem .6rem; display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; }
+  .list-sum { font-size:.85rem; font-weight:700; margin-right:auto; }
   
   .meta { max-width:1200px; margin:.6rem auto .4rem; padding:0 .8rem; color:var(--muted); font-size:.8rem; line-height:1.5; }
   .meta a { color:inherit; }
@@ -527,8 +655,12 @@ PAGE_TEMPLATE = """<!doctype html>
   .card.is-expired img, .card.is-expired figcaption { opacity:.5; }
   .new-tag { position:absolute; top:8px; left:8px; background:#28a745; color:#fff; font-size:.7rem; font-weight:bold; padding:2px 6px;
              border-radius:4px; z-index:2; text-transform:uppercase; }
-  .clr-tag { position:absolute; top:8px; right:8px; background:#6f42c1; color:#fff; font-size:.7rem; font-weight:bold; padding:2px 6px;
-             border-radius:4px; z-index:2; text-transform:uppercase; }
+  .tags-right { position:absolute; top:8px; right:8px; z-index:2; display:flex; flex-direction:column; align-items:flex-end;
+                gap:4px; pointer-events:none; }
+  .disc-tag { background:#d93025; color:#fff; font-size:.8rem; font-weight:800; padding:2px 7px; border-radius:4px;
+              box-shadow:0 1px 3px rgba(0,0,0,.35); }
+  .clr-tag { background:#6f42c1; color:#fff; font-size:.7rem; font-weight:bold; padding:2px 6px; border-radius:4px;
+             text-transform:uppercase; }
   .card a { display:block; }
   .card img { width:100%; aspect-ratio:1/1; object-fit:contain; display:block; background:#fff; }
   .card figcaption { padding:.5rem .6rem; font-size:.85rem; line-height:1.3; flex-grow:1; overflow-wrap:anywhere; }
@@ -536,6 +668,9 @@ PAGE_TEMPLATE = """<!doctype html>
                  border-top:1px solid var(--line); font-size:.8rem; }
   .shop-label { display:flex; align-items:center; gap:.4rem; cursor:pointer; font-weight:500; }
   .shop-label input { width:1.1rem; height:1.1rem; accent-color:var(--accent); cursor:pointer; }
+  .foot-right { display:flex; align-items:center; gap:.3rem; flex-wrap:wrap; justify-content:flex-end; margin-left:auto; }
+  .repeat-tag { font-size:.68rem; font-weight:600; padding:2px 7px; border-radius:999px; border:1px solid var(--line);
+                color:var(--muted); white-space:nowrap; }
   .end-badge { font-size:.72rem; font-weight:700; padding:2px 8px; border-radius:999px; white-space:nowrap; }
   .end-badge.today { background:#dc3545; color:#fff; }
   .end-badge.tomorrow { background:#fd7e14; color:#fff; }
@@ -543,21 +678,32 @@ PAGE_TEMPLATE = """<!doctype html>
   .end-badge.later { background:transparent; color:var(--muted); border:1px solid var(--line); font-weight:600; }
   .end-badge.expired { background:var(--line); color:var(--muted); text-decoration:line-through; }
   .empty { padding:2rem 1rem; text-align:center; color:var(--muted); grid-column:1/-1; }
+
+  .top-btn { position:fixed; right:calc(.8rem + env(safe-area-inset-right,0px)); bottom:calc(.8rem + env(safe-area-inset-bottom,0px));
+             width:2.9rem; height:2.9rem; border-radius:50%; border:none; background:var(--accent); color:var(--on-accent);
+             font-size:1.5rem; font-weight:700; line-height:1; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,.35);
+             z-index:20; opacity:0; pointer-events:none; transition:opacity .2s; }
+  .top-btn.show { opacity:1; pointer-events:auto; }
+
   @media (max-width:640px) {
     .cols-toggle { display:flex; }
     .toolbar { padding:0 .6rem .5rem; gap:.25rem; }
+    .list-bar { padding:0 .6rem .5rem; gap:.3rem; }
     .chip { font-size:.72rem; padding:.22rem .5rem; }
     .chip.icon-only { font-size:.85rem; padding:.22rem .4rem; }
+    .sort-select { font-size:.72rem; padding:.22rem .4rem; }
     .grid { padding:0 .5rem; gap:.5rem; }
     .grid.c1 { grid-template-columns:minmax(0,1fr); }
     .grid.c2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .grid.c2 .card { border-radius:10px; }
     .grid.c2 .card figcaption { font-size:.72rem; padding:.4rem .45rem; }
     .grid.c2 .card-footer { padding:.35rem .45rem .5rem; font-size:.72rem; }
-    .grid.c2 .new-tag, .grid.c2 .clr-tag { font-size:.6rem; top:5px; }
-    .grid.c2 .new-tag { left:5px; }
-    .grid.c2 .clr-tag { right:5px; }
+    .grid.c2 .new-tag, .grid.c2 .clr-tag { font-size:.6rem; }
+    .grid.c2 .new-tag { top:5px; left:5px; }
+    .grid.c2 .tags-right { top:5px; right:5px; gap:3px; }
+    .grid.c2 .disc-tag { font-size:.7rem; padding:1px 5px; }
     .grid.c2 .end-badge { font-size:.65rem; padding:2px 6px; }
+    .grid.c2 .repeat-tag { font-size:.6rem; padding:2px 5px; }
     .title { font-size:.95rem; }
     .meta { padding:0 .6rem; }
   }
@@ -579,6 +725,8 @@ PAGE_TEMPLATE = """<!doctype html>
     __NEW_BTN__
     <button class="chip" id="clr-toggle" type="button" aria-pressed="false">&#127991;&#65039; Clearance (__CLR_COUNT__)</button>
     <button class="chip" id="week-toggle" type="button" aria-pressed="false">&#9200; Ends this week (0)</button>
+    <button class="chip" id="exp-toggle" type="button" aria-pressed="false" hidden>&#128584; Hide expired (0)</button>
+    __REPEAT_BTN__
     <button class="chip icon-only" data-cat="appliances" type="button" aria-pressed="false" title="Appliances">&#129368;</button>
     <button class="chip icon-only" data-cat="electronics" type="button" aria-pressed="false" title="Electronics">&#128187;</button>
     <button class="chip icon-only" data-cat="groceries" type="button" aria-pressed="false" title="Groceries">&#129382;</button>
@@ -586,7 +734,14 @@ PAGE_TEMPLATE = """<!doctype html>
     <button class="chip icon-only" data-cat="clothing" type="button" aria-pressed="false" title="Clothing">&#128084;</button>
     <button class="chip icon-only" data-cat="health" type="button" aria-pressed="false" title="Health">&#128138;</button>
     <button class="chip icon-only" data-cat="home" type="button" aria-pressed="false" title="Home">&#129692;</button>
-    <button class="chip danger" id="clear-list" type="button" hidden>Clear list</button>
+    <select class="sort-select" id="sort" aria-label="Sort items">
+      <option value="default">Sort: Default</option>
+      <option value="disc">Biggest discount</option>
+      <option value="plow">Price: low to high</option>
+      <option value="phigh">Price: high to low</option>
+      <option value="end">Ending soonest</option>
+      <option value="cat">Category</option>
+    </select>
     <div class="cols-toggle">
       <span>Per row</span>
       <span class="seg">
@@ -594,6 +749,12 @@ PAGE_TEMPLATE = """<!doctype html>
         <button type="button" data-cols="2" aria-pressed="true">2</button>
       </span>
     </div>
+  </div>
+  <div class="list-bar" id="list-bar" hidden>
+    <span class="list-sum" id="list-sum"></span>
+    <button class="chip" id="email-list" type="button">&#9993;&#65039; Email</button>
+    <button class="chip" id="share-list" type="button">&#128279; Share</button>
+    <button class="chip danger" id="clear-list" type="button">Clear</button>
   </div>
 </div>
 <div class="meta">
@@ -605,12 +766,15 @@ PAGE_TEMPLATE = """<!doctype html>
 __CARDS__
 <p class="empty" id="no-match" hidden></p>
 </main>
+<button class="top-btn" id="top-btn" type="button" aria-label="Back to top" title="Back to top">&#8593;</button>
 <script>
 (function () {
   var LIST_KEY = 'cocowest_shopping_list';
   var COLS_KEY = 'cocowest_cols';
+  var HIDE_EXP_KEY = 'cocowest_hide_expired';
   var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   var DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  var NL = String.fromCharCode(10);
 
   function load(key, fallback) {
     try {
@@ -635,24 +799,45 @@ __CARDS__
     return { cls: 'week', text: 'Ends ' + DAYS[end.getDay()], inWeek: true, expired: false };
   }
 
+  function hashUrl(s) {
+    var h = 5381;
+    for (var i = 0; i < s.length; i++) { h = ((h << 5) + h + s.charCodeAt(i)) | 0; }
+    return (h >>> 0).toString(36);
+  }
+
   var q = document.getElementById('q');
   var grid = document.getElementById('grid');
   var listBtn = document.getElementById('list-toggle');
   var newBtn = document.getElementById('new-toggle');
   var clrBtn = document.getElementById('clr-toggle');
   var weekBtn = document.getElementById('week-toggle');
+  var expBtn = document.getElementById('exp-toggle');
+  var repBtn = document.getElementById('rep-toggle');
+  var sortSel = document.getElementById('sort');
   var catBtns = Array.prototype.slice.call(document.querySelectorAll('[data-cat]'));
+  var listBar = document.getElementById('list-bar');
+  var listSum = document.getElementById('list-sum');
+  var emailBtn = document.getElementById('email-list');
+  var shareBtn = document.getElementById('share-list');
   var clearBtn = document.getElementById('clear-list');
   var resetBtn = document.getElementById('reset-btn');
+  var topBtn = document.getElementById('top-btn');
   var shownEl = document.getElementById('shown-count');
   var emptyMsg = document.getElementById('no-match');
   var colBtns = Array.prototype.slice.call(document.querySelectorAll('[data-cols]'));
   var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
   var checks = Array.prototype.slice.call(document.querySelectorAll('.shop-check'));
+  var origOrder = cards.slice();
+
+  var hashToUrl = {};
+  cards.forEach(function (el) { hashToUrl[hashUrl(el.getAttribute('data-url'))] = el.getAttribute('data-url'); });
 
   var shoppingList = load(LIST_KEY, []);
   if (!Array.isArray(shoppingList)) shoppingList = [];
-  var state = { listOnly: false, newOnly: false, clrOnly: false, weekOnly: false, activeCat: '' };
+  var state = {
+    listOnly: false, newOnly: false, clrOnly: false, weekOnly: false,
+    hideExp: !!load(HIDE_EXP_KEY, false), hideRep: false, activeCat: '', sort: 'default'
+  };
 
   var now = new Date();
   var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -673,16 +858,74 @@ __CARDS__
     cards.forEach(function (el) { if (fn(el)) n++; });
     return n;
   }
+  function num(el, attr) {
+    var v = parseFloat(el.getAttribute(attr));
+    return isNaN(v) ? null : v;
+  }
+
   if (newBtn) {
     newBtn.innerHTML = '&#10024; New (' + countWhere(function (el) { return el.classList.contains('is-new'); }) + ')';
   }
   clrBtn.innerHTML = '&#127991;&#65039; Clearance (' + countWhere(function (el) { return el.classList.contains('is-clr'); }) + ')';
   weekBtn.innerHTML = '&#9200; Ends this week (' + countWhere(function (el) { return el.getAttribute('data-week') === '1'; }) + ')';
 
+  var expCount = countWhere(function (el) { return el.classList.contains('is-expired'); });
+  if (expCount > 0) {
+    expBtn.hidden = false;
+    expBtn.innerHTML = '&#128584; Hide expired (' + expCount + ')';
+  } else {
+    expBtn.hidden = true;
+    state.hideExp = false;
+  }
+
   function inList(url) { return shoppingList.indexOf(url) !== -1; }
 
   function listCountOnPage() {
     return countWhere(function (el) { return inList(el.getAttribute('data-url')); });
+  }
+
+  function listItems() {
+    return origOrder.filter(function (el) { return inList(el.getAttribute('data-url')); });
+  }
+
+  function setToggle(btn, active) {
+    if (!btn) return;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+
+  function applySort() {
+    var key = state.sort;
+    var list = origOrder.slice();
+    function cmpNullLast(a, b, dir) {
+      if (a === null && b === null) return 0;
+      if (a === null) return 1;
+      if (b === null) return -1;
+      return dir * (a - b);
+    }
+    list.sort(function (a, b) {
+      var r = 0;
+      if (key === 'disc') {
+        r = cmpNullLast(num(a, 'data-disc'), num(b, 'data-disc'), -1);
+      } else if (key === 'plow') {
+        r = cmpNullLast(num(a, 'data-price'), num(b, 'data-price'), 1);
+      } else if (key === 'phigh') {
+        r = cmpNullLast(num(a, 'data-price'), num(b, 'data-price'), -1);
+      } else if (key === 'end') {
+        var xa = a.classList.contains('is-expired'), xb = b.classList.contains('is-expired');
+        var ea = a.getAttribute('data-end'), eb = b.getAttribute('data-end');
+        if (xa !== xb) r = xa ? 1 : -1;
+        else if (ea && !eb) r = -1;
+        else if (!ea && eb) r = 1;
+        else if (ea && eb) r = ea < eb ? -1 : (ea > eb ? 1 : 0);
+      } else if (key === 'cat') {
+        var ca = a.getAttribute('data-cat'), cb = b.getAttribute('data-cat');
+        r = ca < cb ? -1 : (ca > cb ? 1 : 0);
+      }
+      return r || (Number(a.getAttribute('data-idx')) - Number(b.getAttribute('data-idx')));
+    });
+    list.forEach(function (el) { grid.appendChild(el); });
+    grid.appendChild(emptyMsg);
   }
 
   function render() {
@@ -693,34 +936,38 @@ __CARDS__
                (!state.newOnly || el.classList.contains('is-new')) &&
                (!state.clrOnly || el.classList.contains('is-clr')) &&
                (!state.weekOnly || el.getAttribute('data-week') === '1') &&
+               (!state.hideExp || !el.classList.contains('is-expired')) &&
+               (!state.hideRep || el.getAttribute('data-seen') !== '1') &&
                (!state.activeCat || el.getAttribute('data-cat') === state.activeCat) &&
                (!state.listOnly || inList(el.getAttribute('data-url')));
       el.hidden = !ok;
       if (ok) shown++;
     });
 
-    var n = listCountOnPage();
+    var n = 0, sum = 0, unpriced = 0;
+    cards.forEach(function (el) {
+      if (!inList(el.getAttribute('data-url'))) return;
+      n++;
+      var p = num(el, 'data-price');
+      if (p === null) unpriced++; else sum += p;
+    });
+
     listBtn.innerHTML = state.listOnly ? 'Show all items' : '&#128722; List (' + n + ')';
     listBtn.classList.toggle('active', state.listOnly);
-    
-    var toggles = [clrBtn, weekBtn];
-    if (newBtn) toggles.push(newBtn);
-    toggles.forEach(function (btn) {
-      if (!btn) return;
-      var active = (btn === newBtn && state.newOnly) || (btn === clrBtn && state.clrOnly) || (btn === weekBtn && state.weekOnly);
-      btn.classList.toggle('active', active);
-      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
-    });
+
+    setToggle(newBtn, state.newOnly);
+    setToggle(clrBtn, state.clrOnly);
+    setToggle(weekBtn, state.weekOnly);
+    setToggle(expBtn, state.hideExp);
+    setToggle(repBtn, state.hideRep);
 
     catBtns.forEach(function (btn) {
-      var cat = btn.getAttribute('data-cat');
-      var active = (state.activeCat === cat);
-      btn.classList.toggle('active', active);
-      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+      setToggle(btn, state.activeCat === btn.getAttribute('data-cat'));
     });
 
-    clearBtn.hidden = n === 0;
-    clearBtn.textContent = 'Clear list (' + n + ')';
+    listBar.hidden = n === 0;
+    listSum.textContent = n + (n === 1 ? ' item' : ' items') + ' · $' + sum.toFixed(2) +
+                          (unpriced ? ' (+' + unpriced + ' unpriced)' : '');
     shownEl.textContent = shown;
 
     if (shown === 0) {
@@ -730,6 +977,23 @@ __CARDS__
     }
     emptyMsg.hidden = shown !== 0;
   }
+
+  // ---- shared lists: open a link like  page.html#list=abc.def  to import items
+  (function importShared() {
+    var m = /[#&]list=([0-9a-z.]+)/.exec(location.hash || '');
+    if (!m) return;
+    var urls = [];
+    m[1].split('.').forEach(function (h) { if (hashToUrl[h]) urls.push(hashToUrl[h]); });
+    try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+    if (!urls.length) {
+      window.alert('That shared list does not match any items on this page. It may be from an older post.');
+      return;
+    }
+    if (!window.confirm('Add ' + urls.length + ' shared item' + (urls.length === 1 ? '' : 's') + ' to your list?')) return;
+    urls.forEach(function (u) { if (!inList(u)) shoppingList.push(u); });
+    save(LIST_KEY, shoppingList);
+    state.listOnly = true;
+  })();
 
   checks.forEach(function (chk) {
     var url = chk.getAttribute('data-url');
@@ -745,12 +1009,81 @@ __CARDS__
     });
   });
 
+  function shareUrl() {
+    var base = location.href.split('#')[0];
+    var hashes = listItems().map(function (el) { return hashUrl(el.getAttribute('data-url')); });
+    return base + '#list=' + hashes.join('.');
+  }
+
+  function itemLine(el) {
+    var name = (el.getAttribute('data-name') || '').replace(/\s+/g, ' ').trim();
+    if (name.length > 100) name = name.slice(0, 97) + '...';
+    var p = num(el, 'data-price');
+    var d = num(el, 'data-disc');
+    var end = el.getAttribute('data-end');
+    var extra = [];
+    if (p !== null) extra.push('$' + p.toFixed(2));
+    if (d !== null) extra.push(d + '% off');
+    if (end) extra.push('ends ' + end);
+    return '- ' + name + (extra.length ? ' (' + extra.join(', ') + ')' : '');
+  }
+
+  emailBtn.addEventListener('click', function () {
+    var items = listItems();
+    if (!items.length) return;
+    var sum = 0;
+    items.forEach(function (el) { var p = num(el, 'data-price'); if (p !== null) sum += p; });
+    var head = 'My Costco shopping list (' + items.length + ' item' + (items.length === 1 ? '' : 's') + '):' + NL + NL +
+               'Open it on the site: ' + shareUrl() + NL + NL;
+    var tail = NL + 'Total: $' + sum.toFixed(2);
+    var lines = [];
+    var skipped = 0;
+    items.forEach(function (el) {
+      var line = itemLine(el);
+      var test = head + lines.concat([line]).join(NL) + tail;
+      if (encodeURIComponent(test).length < 4000) lines.push(line); else skipped++;
+    });
+    var body = head + lines.join(NL) + (skipped ? NL + '...and ' + skipped + ' more (use the link above)' : '') + tail;
+    window.location.href = 'mailto:?subject=' + encodeURIComponent('Costco shopping list') +
+                           '&body=' + encodeURIComponent(body);
+  });
+
+  shareBtn.addEventListener('click', function () {
+    var items = listItems();
+    if (!items.length) return;
+    var url = shareUrl();
+    if (navigator.share) {
+      navigator.share({ title: 'Costco shopping list', text: items.length + ' items', url: url }).catch(function () {});
+      return;
+    }
+    function fallback() { window.prompt('Copy this link:', url); }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(function () { window.alert('Link copied.'); }, fallback);
+    } else {
+      fallback();
+    }
+  });
+
   listBtn.addEventListener('click', function () { state.listOnly = !state.listOnly; render(); });
   if (newBtn) {
     newBtn.addEventListener('click', function () { state.newOnly = !state.newOnly; render(); });
   }
+  if (repBtn) {
+    repBtn.addEventListener('click', function () { state.hideRep = !state.hideRep; render(); });
+  }
   clrBtn.addEventListener('click', function () { state.clrOnly = !state.clrOnly; render(); });
   weekBtn.addEventListener('click', function () { state.weekOnly = !state.weekOnly; render(); });
+  expBtn.addEventListener('click', function () {
+    state.hideExp = !state.hideExp;
+    save(HIDE_EXP_KEY, state.hideExp);
+    render();
+  });
+
+  sortSel.addEventListener('change', function () {
+    state.sort = sortSel.value;
+    applySort();
+    render();
+  });
   
   catBtns.forEach(function (btn) {
     btn.addEventListener('click', function () {
@@ -767,8 +1100,14 @@ __CARDS__
     state.newOnly = false;
     state.clrOnly = false;
     state.weekOnly = false;
+    state.hideExp = false;
+    state.hideRep = false;
     state.listOnly = false;
     state.activeCat = '';
+    state.sort = 'default';
+    sortSel.value = 'default';
+    save(HIDE_EXP_KEY, false);
+    applySort();
     render();
   });
 
@@ -800,19 +1139,32 @@ __CARDS__
   });
   setCols(Number(load(COLS_KEY, 2)));
 
+  function onScroll() {
+    var y = window.pageYOffset || document.documentElement.scrollTop || 0;
+    topBtn.classList.toggle('show', y > 500);
+  }
+  window.addEventListener('scroll', onScroll, { passive: true });
+  topBtn.addEventListener('click', function () {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+  onScroll();
+
   render();
 })();
 </script>
 </body>
 </html>"""
 
-def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode, exclusive_urls=None) -> str:
+def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
+                exclusive_urls=None, seen_ids=None) -> str:
     stamp = datetime.now(ZoneInfo("America/Vancouver")).strftime("%b %d, %I:%M %p")
     esc = html.escape
     exclusive_urls = exclusive_urls or set()
+    seen_ids = seen_ids or set()
     
     clr_count = sum(1 for i in items if is_clearance(i.label))
     new_count = len(exclusive_urls)
+    repeat_count = sum(1 for i in items if item_ident(i) in seen_ids)
 
     if is_weekend_mode:
         page_title = "Costco Weekend Deals"
@@ -825,28 +1177,54 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
         source_url = monday_url
         source_name = "Monday Sales Post"
 
+    if repeat_count:
+        repeat_btn_html = (f'<button class="chip" id="rep-toggle" type="button" aria-pressed="false" '
+                           f'title="Hide items that were also on last week\'s post">'
+                           f'&#128257; Hide repeats ({repeat_count})</button>')
+    else:
+        repeat_btn_html = ''
+
     cards = []
-    for i in items:
+    for n, i in enumerate(items):
         is_new = i.url in exclusive_urls
         clearance = is_clearance(i.label)
         end = parse_end_date(i.label)
+        pct = discount_pct(i.label)
+        price = price_value(i.label)
+        is_repeat = item_ident(i) in seen_ids
 
         classes = ["card"]
         if is_new:
             classes.append("is-new")
         if clearance:
             classes.append("is-clr")
+        class_str = " ".join(classes)
 
-        attrs = f'data-t="{esc(i.label.lower(), quote=True)}" data-url="{esc(i.url, quote=True)}" data-cat="{esc(i.category, quote=True)}"'
+        attrs = (f'data-t="{esc(i.label.lower(), quote=True)}" '
+                 f'data-name="{esc(i.label, quote=True)}" '
+                 f'data-url="{esc(i.url, quote=True)}" '
+                 f'data-cat="{esc(i.category, quote=True)}" '
+                 f'data-idx="{n}"')
         if end:
             attrs += f' data-end="{end}"'
+        if price is not None:
+            attrs += f' data-price="{price:.2f}"'
+        if pct:
+            attrs += f' data-disc="{pct}"'
+        if is_repeat:
+            attrs += ' data-seen="1"'
 
         new_tag = '<div class="new-tag">&#10024; New</div>' if is_new else ''
+        disc_tag = f'<div class="disc-tag">-{pct}%</div>' if pct else ''
         clr_tag = '<div class="clr-tag">&#127991;&#65039; Clearance</div>' if clearance else ''
+        right_tags = f'<div class="tags-right">{disc_tag}{clr_tag}</div>' if (pct or clearance) else ''
         end_badge = '<span class="end-badge" hidden></span>' if end else ''
+        repeat_tag = ('<span class="repeat-tag" title="Also on last week\'s post">&#128257; Repeat</span>'
+                      if is_repeat else '')
+        foot_right = f'<span class="foot-right">{repeat_tag}{end_badge}</span>' if (repeat_tag or end_badge) else ''
 
-        cards.append(f'''<figure class="{' '.join(classes)}" {attrs}>
-  {new_tag}{clr_tag}
+        cards.append(f'''<figure class="{class_str}" {attrs}>
+  {new_tag}{right_tags}
   <a href="{esc(i.url, quote=True)}" target="_blank" rel="noopener">
     <img src="{esc(i.url, quote=True)}" alt="{esc(i.label, quote=True)}" loading="lazy" referrerpolicy="no-referrer">
   </a>
@@ -855,7 +1233,7 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
     <label class="shop-label">
       <input type="checkbox" class="shop-check" data-url="{esc(i.url, quote=True)}"> Add to list
     </label>
-    {end_badge}
+    {foot_right}
   </div>
 </figure>''')
 
@@ -866,6 +1244,7 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
             .replace("__TOTAL__", str(len(items)))
             .replace("__CLR_COUNT__", str(clr_count))
             .replace("__NEW_BTN__", new_btn_html)
+            .replace("__REPEAT_BTN__", repeat_btn_html)
             .replace("__LOCATION__", esc(store_location or "Metro Vancouver Area"))
             .replace("__STAMP__", stamp)
             .replace("__SOURCE_URL__", esc(source_url, quote=True))
@@ -915,6 +1294,7 @@ def main() -> int:
 
     target_items = weekend_items if is_weekend_mode else monday_items
     target_url = weekend_url if is_weekend_mode else monday_url
+    mode = "weekend" if is_weekend_mode else "flyer"
 
     print(f"Mode: {'Weekend Exclusives' if is_weekend_mode else 'Monday Sales Post'}")
     print(f"Location: {store_location}")
@@ -922,20 +1302,28 @@ def main() -> int:
 
     prev_state, state_ok = load_previous_state(scraper)
 
+    seen_ids = previous_ids(prev_state, mode, target_url)
+    ids = sorted({item_ident(i) for i in target_items})
+    history = build_history(prev_state, mode, target_url, ids)
+    print(f"Repeats from previous post: {sum(1 for i in target_items if item_ident(i) in seen_ids)}")
+    print(f"Items with a discount %: {sum(1 for i in target_items if discount_pct(i.label))}")
+
     (OUTPUT_DIR / "index.html").write_text(
-        render_html(target_items, monday_url, weekend_url or monday_url, store_location, is_weekend_mode, exclusive_urls),
+        render_html(target_items, monday_url, weekend_url or monday_url, store_location,
+                    is_weekend_mode, exclusive_urls, seen_ids),
         encoding="utf-8")
     
     (OUTPUT_DIR / "state.json").write_text(json.dumps({
         "weekend_url": weekend_url,
         "flyer_url": monday_url,
-        "mode": "weekend" if is_weekend_mode else "flyer",
+        "mode": mode,
         "total_count": len(target_items),
         "exclusive_count": len(exclusive),
         "updated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "history": history,
     }, indent=2), encoding="utf-8")
 
-    maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, len(target_items), len(exclusive))
+    maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, target_items, exclusive)
     return 0
 
 if __name__ == "__main__":
