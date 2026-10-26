@@ -692,7 +692,7 @@ __CARDS__
       var ok = (!t || el.getAttribute('data-t').indexOf(t) !== -1) &&
                (!state.newOnly || el.classList.contains('is-new')) &&
                (!state.clrOnly || el.classList.contains('is-clr')) &&
-               (!state.weekOnly || el.getAttribute('data-week'] === '1') &&
+               (!state.weekOnly || el.getAttribute('data-week') === '1') &&
                (!state.activeCat || el.getAttribute('data-cat') === state.activeCat) &&
                (!state.listOnly || inList(el.getAttribute('data-url')));
       el.hidden = !ok;
