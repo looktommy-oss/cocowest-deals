@@ -378,10 +378,6 @@ PRICE_RE = re.compile(r"\$\s?(\d[\d,]*)\.(\d{2})\b")
 END_RE = re.compile(
     r"(?:EXPIRES|ENDS|VALID\s+(?:UNTIL|THROUGH|THRU))\s+(?:ON\s+)?(\d{4}-\d{2}-\d{2})", re.I)
 
-# Savings wording. These are best guesses at how the labels are phrased:
-#   "SAVE $5.00", "$5 OFF", "$5.00 instant savings"   -> amount saved
-#   "REG $14.99", "WAS $14.99", "REGULAR PRICE $14.99" -> original price
-#   "25% OFF"                                          -> explicit percentage
 MONEY = r"\$\s?(\d[\d,]*(?:\.\d{1,2})?)"
 SAVE_RE = re.compile(r"\b(?:you\s+)?(?:instant\s+)?(?:save|savings?)\s*(?:of\s*)?:?\s*" + MONEY, re.I)
 OFF_RE = re.compile(MONEY + r"\s*(?:off|instant\s+savings?|savings?|discount)\b", re.I)
@@ -394,7 +390,6 @@ def parse_price(label: str):
     return found[-1] if found else None
 
 def strip_savings(label: str) -> str:
-    """Remove 'save $X' / '$X off' / 'reg $X' phrases so they aren't mistaken for the sale price."""
     text = label or ""
     for rx in (SAVE_RE, OFF_RE, REG_RE):
         text = rx.sub(" ", text)
@@ -417,7 +412,6 @@ def _sane_pct(pct):
     return pct if pct is not None and 1 <= pct <= 90 else None
 
 def discount_pct(label: str):
-    """Return an int percentage off, or None when it can't be worked out reliably."""
     label = label or ""
     m = PCT_OFF_RE.search(label)
     if m:
@@ -454,11 +448,9 @@ def parse_end_date(label: str) -> str:
 # --------------------------------------------------------- state + alerting
 
 def item_ident(it: Item) -> str:
-    """Stable identity used to recognise the same product across weekly posts."""
     return f"no:{it.item_no}" if it.item_no else (it.file_key or it.alt_key or it.url)
 
 def _previous_entry(prev_state, mode, target_url):
-    """The 'previous post' record for this mode: the last post that is NOT the current one."""
     entry = (prev_state.get("history") or {}).get(mode) or {}
     cur = entry.get("current") or {}
     if cur.get("url") == target_url:
@@ -740,6 +732,7 @@ PAGE_TEMPLATE = """<!doctype html>
       <option value="plow">Price: low to high</option>
       <option value="phigh">Price: high to low</option>
       <option value="end">Ending soonest</option>
+      <option value="end_rev">Ending latest</option>
       <option value="cat">Category</option>
     </select>
     <div class="cols-toggle">
@@ -911,13 +904,15 @@ __CARDS__
         r = cmpNullLast(num(a, 'data-price'), num(b, 'data-price'), 1);
       } else if (key === 'phigh') {
         r = cmpNullLast(num(a, 'data-price'), num(b, 'data-price'), -1);
-      } else if (key === 'end') {
+      } else if (key === 'end' || key === 'end_rev') {
+        var rev = (key === 'end_rev');
         var xa = a.classList.contains('is-expired'), xb = b.classList.contains('is-expired');
         var ea = a.getAttribute('data-end'), eb = b.getAttribute('data-end');
         if (xa !== xb) r = xa ? 1 : -1;
         else if (ea && !eb) r = -1;
         else if (!ea && eb) r = 1;
         else if (ea && eb) r = ea < eb ? -1 : (ea > eb ? 1 : 0);
+        if (rev) r = -r;
       } else if (key === 'cat') {
         var ca = a.getAttribute('data-cat'), cb = b.getAttribute('data-cat');
         r = ca < cb ? -1 : (ca > cb ? 1 : 0);
@@ -978,7 +973,6 @@ __CARDS__
     emptyMsg.hidden = shown !== 0;
   }
 
-  // ---- shared lists: open a link like  page.html#list=abc.def  to import items
   (function importShared() {
     var m = /[#&]list=([0-9a-z.]+)/.exec(location.hash || '');
     if (!m) return;
