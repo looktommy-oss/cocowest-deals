@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Scrape CocoWest.ca for Costco posts with category tagging and filtering,
+Scrape CocoWest.ca for Costco posts with robust category tagging and filtering,
 smart date-aware post discovery, Vancouver time stamps, shopping list, store location, clearance tags, and end dates.
 
 Env overrides:
@@ -163,7 +163,6 @@ class Item:
     us_key: str
     item_no: str
     category: str
-    discount: str
 
 CATEGORY_RULES = {
     "groceries": re.compile(r"\b(coffee|protein|snack|meat|chicken|beef|pork|salmon|shrimp|bacon|sausage|juice|water|milk|cheese|chips|chocolate|cookie|bar|almond|rice|pasta|sauce|soup|oil|dressing|bread|cereal|yogurt|fruit|vegetable|salad|pizza|dumpling|egg|butter|nuts|honey|syrup|tea|wine|beer|spirits|kirkland|granola|tortilla|salsa|frozen|organic|crackers|oats|soda|coke|pepsi|torani|croissant|muffin|pie|cake|deli|ham|turkey|salami|dip|hummus|guacamole|tuna|tofu|broth|ketchup|mayo|mustard|spices|seasoning|strudel|strudels|chia|apple\s+juice|apple\s+sauce|apple\s+pie|steak|ribs|wings|burger|hotdog|noodle|ramen|tortellini|ravioli|ice\s*cream|gelato|sorbet|sparkling|lemonade|energy\s*drink|gatorade|electrolyte|pretzels|popcorn|cashew|pistachio|walnut|pecan|raisin|cranberry)\b", re.I),
@@ -313,14 +312,13 @@ def extract_from(container, page_url: str, stats: Counter):
         file_key = filename_key(url)
         item_no = find_item_no(alt, url)
         category = detect_category(label)
-        discount = parse_discount(label)
         dedupe_key = f"no:{item_no}" if item_no else (file_key or alt_key or url)
         if dedupe_key in seen:
             continue
         seen.add(dedupe_key)
         items.append(Item(url=url, label=label, alt=alt, alt_key=alt_key, 
                           file_key=file_key, us_key=userscript_key(img), 
-                          item_no=item_no, category=category, discount=discount))
+                          item_no=item_no, category=category))
     return items, imgs
 
 def extract_items(post_html: str, page_url: str):
@@ -377,18 +375,11 @@ def find_exclusive_userscript(weekend_items, monday_items):
 PRICE_RE = re.compile(r"\$\s?(\d[\d,]*)\.(\d{2})\b")
 END_RE = re.compile(
     r"(?:EXPIRES|ENDS|VALID\s+(?:UNTIL|THROUGH|THRU))\s+(?:ON\s+)?(\d{4}-\d{2}-\d{2})", re.I)
-DISCOUNT_RE = re.compile(r"\$(\d+(?:\.\d{2})?)\s+(?:OFF|INSTANT\s+SAVINGS)", re.I)
 
 def parse_price(label: str):
     text = re.sub(r"\([^)]*\)", " ", label or "")
     found = PRICE_RE.findall(text)
     return found[-1] if found else None
-
-def parse_discount(label: str) -> str:
-    m = DISCOUNT_RE.search(label or "")
-    if m:
-        return f"${m.group(1)} OFF"
-    return ""
 
 def is_clearance(label: str) -> bool:
     p = parse_price(label)
@@ -538,7 +529,6 @@ PAGE_TEMPLATE = """<!doctype html>
              border-radius:4px; z-index:2; text-transform:uppercase; }
   .clr-tag { position:absolute; top:8px; right:8px; background:#6f42c1; color:#fff; font-size:.7rem; font-weight:bold; padding:2px 6px;
              border-radius:4px; z-index:2; text-transform:uppercase; }
-  .disc-tag { position:absolute; top:32px; left:8px; background:#d9534f; color:#fff; font-size:.65rem; font-weight:bold; padding:2px 6px; border-radius:4px; z-index:2; text-transform:uppercase; }
   .card a { display:block; }
   .card img { width:100%; aspect-ratio:1/1; object-fit:contain; display:block; background:#fff; }
   .card figcaption { padding:.5rem .6rem; font-size:.85rem; line-height:1.3; flex-grow:1; overflow-wrap:anywhere; }
@@ -702,7 +692,7 @@ __CARDS__
       var ok = (!t || el.getAttribute('data-t').indexOf(t) !== -1) &&
                (!state.newOnly || el.classList.contains('is-new')) &&
                (!state.clrOnly || el.classList.contains('is-clr')) &&
-               (!state.weekOnly || el.getAttribute('data-week'] === '1') &&
+               (!state.weekOnly || el.getAttribute('data-week') === '1') &&
                (!state.activeCat || el.getAttribute('data-cat') === state.activeCat) &&
                (!state.listOnly || inList(el.getAttribute('data-url')));
       el.hidden = !ok;
@@ -853,11 +843,10 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
 
         new_tag = '<div class="new-tag">&#10024; New</div>' if is_new else ''
         clr_tag = '<div class="clr-tag">&#127991;&#65039; Clearance</div>' if clearance else ''
-        disc_tag = f'<div class="disc-tag">🔥 {i.discount}</div>' if i.discount else ''
         end_badge = '<span class="end-badge" hidden></span>' if end else ''
 
         cards.append(f'''<figure class="{' '.join(classes)}" {attrs}>
-  {new_tag}{clr_tag}{disc_tag}
+  {new_tag}{clr_tag}
   <a href="{esc(i.url, quote=True)}" target="_blank" rel="noopener">
     <img src="{esc(i.url, quote=True)}" alt="{esc(i.label, quote=True)}" loading="lazy" referrerpolicy="no-referrer">
   </a>
