@@ -3,12 +3,7 @@
 Scrape CocoWest.ca for Costco posts with robust category tagging and filtering,
 smart date-aware post discovery, Vancouver time stamps, shopping list, store location,
 clearance tags, end dates, discount % badges, sorting, list totals, emailable/shareable
-shopping list, repeat-item markers, permanent post archiving, and smart one-time SKU price history scraping.
-
-Env overrides:
-  MONDAY_URL, WEEKEND_URL      skip homepage discovery
-  MATCH_MODE                   "smart" (default) or "userscript"
-  OUTPUT_DIR                   default: public
+shopping list, repeat-item markers, permanent post archiving, and local price history tracking.
 """
 import html
 import json
@@ -539,33 +534,8 @@ def build_history(prev_state, mode, target_url, ids):
     }
     return history
 
-def scrape_cocowest_item_history(scraper, item_no: str):
-    """Fetches full historical price table from cocowest.ca/item/<item_no>"""
-    url = f"{BASE_URL}item/{item_no}"
-    try:
-        html_text = fetch(scraper, url, retries=2)
-        soup = BeautifulSoup(html_text, "html.parser")
-        
-        records = []
-        rows = soup.find_all("tr")
-        for tr in rows:
-            tds = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
-            if len(tds) >= 4:
-                date_posted = tds[0].strip()
-                p_str = tds[3].replace("$", "").replace(",", "").strip()
-                if re.match(r"^\d{4}-\d{2}-\d{2}$", date_posted):
-                    try:
-                        price = float(p_str)
-                        records.append({"date": date_posted, "price": price, "pct": None})
-                    except ValueError:
-                        continue
-        return records
-    except Exception as exc:
-        print(f"[history] Could not fetch history for SKU {item_no}: {exc!r}", file=sys.stderr)
-        return []
-
-def update_price_db(scraper, prev_state, target_items, valid_range):
-    """Accumulates SKU price history, deep-scraping cocowest.ca/item/<sku> when needed."""
+def update_price_db(prev_state, target_items, valid_range):
+    """Accumulates price history naturally week-by-week with zero external fetching."""
     db = dict(prev_state.get("price_db") or {})
     today_str = datetime.now(ZoneInfo("America/Vancouver")).strftime("%Y-%m-%d")
     date_label = valid_range[0].isoformat() if valid_range else today_str
@@ -574,20 +544,7 @@ def update_price_db(scraper, prev_state, target_items, valid_range):
         ident = item_ident(i)
         price = price_value(i.label)
         pct = discount_pct(i.label)
-        entry = db.get(ident, {"name": i.label, "item_no": i.item_no, "history": [], "full_scraped": False})
-
-        # Re-scrape if we have an item number and fewer than 2 history points recorded yet
-        if i.item_no and (not entry.get("full_scraped") or len(entry.get("history", [])) <= 1):
-            print(f"[history] Deep scraping CocoWest price history for SKU {i.item_no}...")
-            remote_records = scrape_cocowest_item_history(scraper, i.item_no)
-            if remote_records:
-                existing_dates = {h["date"] for h in entry["history"]}
-                for r in remote_records:
-                    if r["date"] not in existing_dates:
-                        entry["history"].append(r)
-                entry["history"].sort(key=lambda x: x["date"])
-            entry["full_scraped"] = True
-            time.sleep(random.uniform(0.5, 1.0))
+        entry = db.get(ident, {"name": i.label, "item_no": i.item_no, "history": []})
 
         if price is not None:
             hist = entry["history"]
@@ -991,17 +948,17 @@ __CARDS__
       fetchPriceDb(function(db) {
         var item = db[ident];
         var historyArr = item && item.history ? item.history : [];
+        var externalLinkHtml = sku ? '<p style="font-size:.80rem;margin-top:.8rem;text-align:right;"><a href="https://www.cocowest.ca/item/' + sku + '" target="_blank" rel="noopener" style="color:var(--accent);">View original on CocoWest &rarr;</a></p>' : '';
         
         if (!historyArr.length) {
-          modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price data recorded yet for this item.</p>' +
-                                (sku ? '<p style="font-size:.80rem;margin-top:.4rem;"><a href="https://www.cocowest.ca/item/' + sku + '" target="_blank" rel="noopener" style="color:var(--accent);">View on CocoWest &rarr;</a></p>' : '');
+          modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price data recorded yet for this item.</p>' + externalLinkHtml;
           return;
         }
         var html = '<p style="color:var(--muted);font-size:.85rem;">Recorded Price History:</p><ul class="hist-list">';
         historyArr.slice().reverse().forEach(function(h) {
           html += '<li class="hist-item"><span><b>' + h.date + '</b></span><span>$' + Number(h.price).toFixed(2) + (h.pct ? ' (' + h.pct + '% off)' : '') + '</span></li>';
         });
-        html += '</ul>';
+        html += '</ul>' + externalLinkHtml;
         modalBody.innerHTML = html;
       });
     }
@@ -1534,7 +1491,7 @@ def main() -> int:
     seen_ids = previous_ids(prev_state, mode, target_url)
     ids = sorted({item_ident(i) for i in target_items})
     history = build_history(prev_state, mode, target_url, ids)
-    price_db = update_price_db(scraper, prev_state, target_items, valid_range)
+    price_db = update_price_db(prev_state, target_items, valid_range)
 
     html_content = render_html(target_items, monday_url, weekend_url or monday_url, store_location,
                                is_weekend_mode, exclusive_urls, seen_ids, valid_range, stale)
