@@ -905,18 +905,20 @@ __CARDS__
       } else if (key === 'phigh') {
         r = cmpNullLast(num(a, 'data-price'), num(b, 'data-price'), -1);
       } else if (key === 'end' || key === 'end_rev') {
-        var rev = (key === 'end_rev');
-        var xa = a.classList.contains('is-expired'), xb = b.classList.contains('is-expired');
-        var ea = a.getAttribute('data-end'), eb = b.getAttribute('data-end');
-        if (xa !== xb) r = xa ? 1 : -1;
-        else if (ea && !eb) r = -1;
-        else if (!ea && eb) r = 1;
-        else if (ea && eb) r = ea < eb ? -1 : (ea > eb ? 1 : 0);
+      var rev = (key === 'end_rev');
+      var xa = a.classList.contains('is-expired'), xb = b.classList.contains('is-expired');
+      var ea = a.getAttribute('data-end'), eb = b.getAttribute('data-end');
+      if (xa !== xb) r = xa ? 1 : -1;
+      else if (ea && !eb) r = -1;
+      else if (!ea && eb) r = 1;
+      else if (ea && eb) {
+        r = ea < eb ? -1 : (ea > eb ? 1 : 0);
         if (rev) r = -r;
-      } else if (key === 'cat') {
-        var ca = a.getAttribute('data-cat'), cb = b.getAttribute('data-cat');
-        r = ca < cb ? -1 : (ca > cb ? 1 : 0);
       }
+     else if (key === 'cat') {
+      var ca = a.getAttribute('data-cat'), cb = b.getAttribute('data-cat');
+      r = ca < cb ? -1 : (ca > cb ? 1 : 0);
+    }
       return r || (Number(a.getAttribute('data-idx')) - Number(b.getAttribute('data-idx')));
     });
     list.forEach(function (el) { grid.appendChild(el); });
