@@ -969,101 +969,7 @@ __CARDS__
   var origOrder = cards.slice();
 
   var hashToUrl = {};
-  cards.forEach(function(card) {
-    var ident = card.getAttribute('data-ident');
-    var name = card.getAttribute('data-name');
-    var sku = card.getAttribute('data-sku');
-    var trigger = card.querySelector('figcaption');
-    var skuBadge = card.querySelector('.sku-badge');
-
-    function renderHistoryList(historyArr) {
-      if (!historyArr || !historyArr.length) {
-        modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price data found.</p>';
-        return;
-      }
-      var html = '<p style="color:var(--muted);font-size:.85rem;">Recorded Price History:</p><ul class="hist-list">';
-      historyArr.slice().reverse().forEach(function(h) {
-        html += '<li class="hist-item"><span><b>' + h.date + '</b></span><span>$' + Number(h.price).toFixed(2) + (h.pct ? ' (' + h.pct + '% off)' : '') + '</span></li>';
-      });
-      html += '</ul>';
-      modalBody.innerHTML = html;
-    }
-
-    function showModal() {
-      modalTitle.textContent = name;
-      modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Loading live price history...</p>';
-      modal.hidden = false;
-
-      fetchPriceDb(function(db) {
-        var item = db[ident];
-        if (item && item.history && item.history.length > 1) {
-          renderHistoryList(item.history);
-          return;
-        }
-
-        if (!sku) {
-          if (item && item.history) {
-            renderHistoryList(item.history);
-          } else {
-            modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No SKU available to look up history.</p>';
-          }
-          return;
-        }
-
-        var targetUrl = 'https://www.cocowest.ca/?s=' + sku;
-        var proxyUrl = 'https://corsproxy.io/?' + encodeURIComponent(targetUrl);
-
-        fetch(proxyUrl)
-          .then(function(res) {
-            return res.text();
-          })
-          .then(function(html) {
-            console.log("Proxy HTML length:", html ? html.length : 0);
-            if (!html) throw new Error('Empty proxy response');
-
-            var parser = new DOMParser();
-            var doc = parser.parseFromString(html, 'text/html');
-            var rows = Array.prototype.slice.call(doc.querySelectorAll('tr'));
-            console.log("Found table rows:", rows.length);
-
-            var records = [];
-            rows.forEach(function(tr) {
-              var tds = Array.prototype.slice.call(tr.querySelectorAll('td, th')).map(function(td) {
-                return td.textContent.trim();
-              });
-              if (tds.length >= 4) {
-                var datePosted = tds[0];
-                var pStr = tds[3].replace('$', '').replace(',', '').trim();
-                if (/^\d{4}-\d{2}-\d{2}$/.test(datePosted)) {
-                  var price = parseFloat(pStr);
-                  if (!isNaN(price)) {
-                    records.push({ date: datePosted, price: price, pct: null });
-                  }
-                }
-              }
-            });
-
-            if (records.length > 0) {
-              renderHistoryList(records);
-            } else if (item && item.history && item.history.length) {
-              renderHistoryList(item.history);
-            } else {
-              modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price table found on item page.</p>';
-            }
-          })
-          .catch(function(err) {
-            if (item && item.history) {
-              renderHistoryList(item.history);
-            } else {
-              modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Could not load live history.</p>';
-            }
-          });
-      });
-    }
-
-    if (trigger) trigger.addEventListener('click', showModal);
-    if (skuBadge) skuBadge.addEventListener('click', showModal);
-  });
+  cards.forEach(function (el) { hashToUrl[hashUrl(el.getAttribute('data-url'))] = el.getAttribute('data-url'); });
 
   var priceDb = null;
   function fetchPriceDb(cb) {
@@ -1073,6 +979,33 @@ __CARDS__
       cb(priceDb);
     }).catch(function(){ cb({}); });
   }
+
+  cards.forEach(function(card) {
+    var ident = card.getAttribute('data-ident');
+    var name = card.getAttribute('data-name');
+    var trigger = card.querySelector('figcaption');
+    var skuBadge = card.querySelector('.sku-badge');
+    function showModal() {
+      modalTitle.textContent = name;
+      modalBody.innerHTML = 'Loading SKU history...';
+      modal.hidden = false;
+      fetchPriceDb(function(db) {
+        var item = db[ident];
+        if (!item || !item.history || !item.history.length) {
+          modalBody.innerHTML = '<p>No historical price data recorded yet for this item.</p>';
+          return;
+        }
+        var html = '<p style="color:var(--muted);font-size:.85rem;">Recorded Price History:</p><ul class="hist-list">';
+        item.history.slice().reverse().forEach(function(h) {
+          html += '<li class="hist-item"><span><b>' + h.date + '</b></span><span>$' + Number(h.price).toFixed(2) + (h.pct ? ' (' + h.pct + '% off)' : '') + '</span></li>';
+        });
+        html += '</ul>';
+        modalBody.innerHTML = html;
+      });
+    }
+    if (trigger) trigger.addEventListener('click', showModal);
+    if (skuBadge) skuBadge.addEventListener('click', showModal);
+  });
 
   modalClose.addEventListener('click', function() { modal.hidden = true; });
   modal.addEventListener('click', function(e) { if (e.target === modal) modal.hidden = true; });
@@ -1478,12 +1411,11 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
         class_str = " ".join(classes)
 
         attrs = (f'data-t="{esc(i.label.lower(), quote=True)}" '
-             f'data-name="{esc(i.label, quote=True)}" '
-             f'data-url="{esc(i.url, quote=True)}" '
-             f'data-ident="{esc(ident, quote=True)}" '
-             f'data-sku="{esc(i.item_no or "")}" '
-             f'data-cat="{esc(i.category, quote=True)}" '
-             f'data-idx="{n}"')
+                 f'data-name="{esc(i.label, quote=True)}" '
+                 f'data-url="{esc(i.url, quote=True)}" '
+                 f'data-ident="{esc(ident, quote=True)}" '
+                 f'data-cat="{esc(i.category, quote=True)}" '
+                 f'data-idx="{n}"')
         if end:
             attrs += f' data-end="{end}"'
         if price is not None:
