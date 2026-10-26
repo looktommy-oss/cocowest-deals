@@ -725,6 +725,7 @@ PAGE_TEMPLATE = """<!doctype html>
     __NEW_BTN__
     <button class="chip" id="clr-toggle" type="button" aria-pressed="false">&#127991;&#65039; Clearance (__CLR_COUNT__)</button>
     <button class="chip" id="week-toggle" type="button" aria-pressed="false">&#9200; Ends this week (0)</button>
+    <button class="chip" id="wkhide-toggle" type="button" aria-pressed="false" hidden>&#128683; Hide ending this week (0)</button>
     <button class="chip" id="exp-toggle" type="button" aria-pressed="false" hidden>&#128584; Hide expired (0)</button>
     __REPEAT_BTN__
     <button class="chip icon-only" data-cat="appliances" type="button" aria-pressed="false" title="Appliances">&#129368;</button>
@@ -740,6 +741,7 @@ PAGE_TEMPLATE = """<!doctype html>
       <option value="plow">Price: low to high</option>
       <option value="phigh">Price: high to low</option>
       <option value="end">Ending soonest</option>
+      <option value="endlate">Ending latest</option>
       <option value="cat">Category</option>
     </select>
     <div class="cols-toggle">
@@ -811,6 +813,7 @@ __CARDS__
   var newBtn = document.getElementById('new-toggle');
   var clrBtn = document.getElementById('clr-toggle');
   var weekBtn = document.getElementById('week-toggle');
+  var wkHideBtn = document.getElementById('wkhide-toggle');
   var expBtn = document.getElementById('exp-toggle');
   var repBtn = document.getElementById('rep-toggle');
   var sortSel = document.getElementById('sort');
@@ -835,7 +838,7 @@ __CARDS__
   var shoppingList = load(LIST_KEY, []);
   if (!Array.isArray(shoppingList)) shoppingList = [];
   var state = {
-    listOnly: false, newOnly: false, clrOnly: false, weekOnly: false,
+    listOnly: false, newOnly: false, clrOnly: false, weekOnly: false, hideWeek: false,
     hideExp: !!load(HIDE_EXP_KEY, false), hideRep: false, activeCat: '', sort: 'default'
   };
 
@@ -867,7 +870,14 @@ __CARDS__
     newBtn.innerHTML = '&#10024; New (' + countWhere(function (el) { return el.classList.contains('is-new'); }) + ')';
   }
   clrBtn.innerHTML = '&#127991;&#65039; Clearance (' + countWhere(function (el) { return el.classList.contains('is-clr'); }) + ')';
-  weekBtn.innerHTML = '&#9200; Ends this week (' + countWhere(function (el) { return el.getAttribute('data-week') === '1'; }) + ')';
+  var weekCount = countWhere(function (el) { return el.getAttribute('data-week') === '1'; });
+  weekBtn.innerHTML = '&#9200; Ends this week (' + weekCount + ')';
+  if (weekCount > 0) {
+    wkHideBtn.hidden = false;
+    wkHideBtn.innerHTML = '&#128683; Hide ending this week (' + weekCount + ')';
+  } else {
+    wkHideBtn.hidden = true;
+  }
 
   var expCount = countWhere(function (el) { return el.classList.contains('is-expired'); });
   if (expCount > 0) {
@@ -918,6 +928,11 @@ __CARDS__
         else if (ea && !eb) r = -1;
         else if (!ea && eb) r = 1;
         else if (ea && eb) r = ea < eb ? -1 : (ea > eb ? 1 : 0);
+      } else if (key === 'endlate') {
+        var la = a.getAttribute('data-end'), lb = b.getAttribute('data-end');
+        if (la && !lb) r = -1;
+        else if (!la && lb) r = 1;
+        else if (la && lb) r = la > lb ? -1 : (la < lb ? 1 : 0);
       } else if (key === 'cat') {
         var ca = a.getAttribute('data-cat'), cb = b.getAttribute('data-cat');
         r = ca < cb ? -1 : (ca > cb ? 1 : 0);
@@ -936,6 +951,7 @@ __CARDS__
                (!state.newOnly || el.classList.contains('is-new')) &&
                (!state.clrOnly || el.classList.contains('is-clr')) &&
                (!state.weekOnly || el.getAttribute('data-week') === '1') &&
+               (!state.hideWeek || el.getAttribute('data-week') !== '1') &&
                (!state.hideExp || !el.classList.contains('is-expired')) &&
                (!state.hideRep || el.getAttribute('data-seen') !== '1') &&
                (!state.activeCat || el.getAttribute('data-cat') === state.activeCat) &&
@@ -958,6 +974,7 @@ __CARDS__
     setToggle(newBtn, state.newOnly);
     setToggle(clrBtn, state.clrOnly);
     setToggle(weekBtn, state.weekOnly);
+    setToggle(wkHideBtn, state.hideWeek);
     setToggle(expBtn, state.hideExp);
     setToggle(repBtn, state.hideRep);
 
@@ -1072,7 +1089,16 @@ __CARDS__
     repBtn.addEventListener('click', function () { state.hideRep = !state.hideRep; render(); });
   }
   clrBtn.addEventListener('click', function () { state.clrOnly = !state.clrOnly; render(); });
-  weekBtn.addEventListener('click', function () { state.weekOnly = !state.weekOnly; render(); });
+  weekBtn.addEventListener('click', function () {
+    state.weekOnly = !state.weekOnly;
+    if (state.weekOnly) state.hideWeek = false;
+    render();
+  });
+  wkHideBtn.addEventListener('click', function () {
+    state.hideWeek = !state.hideWeek;
+    if (state.hideWeek) state.weekOnly = false;
+    render();
+  });
   expBtn.addEventListener('click', function () {
     state.hideExp = !state.hideExp;
     save(HIDE_EXP_KEY, state.hideExp);
@@ -1100,6 +1126,7 @@ __CARDS__
     state.newOnly = false;
     state.clrOnly = false;
     state.weekOnly = false;
+    state.hideWeek = false;
     state.hideExp = false;
     state.hideRep = false;
     state.listOnly = false;
