@@ -580,7 +580,7 @@ def update_price_db(scraper, prev_state, target_items, valid_range):
         entry = db.get(ident, {"name": i.label, "item_no": i.item_no, "history": [], "full_scraped": False})
 
         # Deep scrape history from CocoWest item page if we haven't already
-       if i.item_no and (not entry.get("full_scraped") or len(entry.get("history", [])) <= 1):
+        if i.item_no and (not entry.get("full_scraped") or len(entry.get("history", [])) <= 1):
             print(f"[history] Deep scraping CocoWest price history for SKU {i.item_no}...")
             remote_records = scrape_cocowest_item_history(scraper, i.item_no)
             if remote_records:
