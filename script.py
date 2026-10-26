@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Scrape CocoWest.ca for Costco posts with category tagging and filtering,
+Scrape CocoWest.ca for Costco posts with robust category tagging and filtering,
 smart date-aware post discovery, Vancouver time stamps, shopping list, store location, clearance tags, and end dates.
 
 Env overrides:
@@ -165,13 +165,13 @@ class Item:
     category: str
 
 CATEGORY_RULES = {
-    "appliances": re.compile(r"\b(toaster|blender|coffee|espresso|air\s*fryer|microwave|mixer|cookware|pan|pot|kettle|vacuum|shaver|toothbrush|fan|heater|grill|cooker|fridge|freezer|iron|steamer|ice\s*maker|juicer|food\s*processor)\b", re.I),
-    "electronics": re.compile(r"\b(tv|television|monitor|speaker|headphone|earbud|soundbar|sound\s*bar|laptop|tablet|phone|iphone|galaxy|ipad|macbook|charger|cable|router|camera|smart\s*watch|projector|receiver|hdmi|usb|hub|apple|samsung|sony|bose|jbl)\b", re.I),
-    "groceries": re.compile(r"\b(coffee|protein|snack|meat|chicken|beef|pork|salmon|shrimp|bacon|sausage|juice|water|milk|cheese|chips|chocolate|cookie|bar|almond|rice|pasta|sauce|soup|oil|dressing|bread|cereal|yogurt|fruit|vegetable|salad|pizza|dumpling|egg|butter|nuts|honey|syrup|tea|wine|beer|spirits|kirkland|granola|tortilla|salsa|frozen|organic|crackers|oats)\b", re.I),
-    "household": re.compile(r"\b(paper\s*towel|toilet\s*paper|tissues?|detergent|dish\s*soap|trash\s*bags?|garbage\s*bags?|foil|ziploc|sponge|cleaner|batteries|battery|light\s*bulb|napkins?|wipes?|laundry|fabric\s*softener|storage\s*box|container|bag|wrap)\b", re.I),
-    "clothing": re.compile(r"\b(pants?|jeans|hoodie|sweatshirt|socks?|jacket|coat|shirt|shorts?|sweater|underwear|shoes?|boots?|slippers?|gloves?|hat|leggings?|t-shirt|belt|pyjamas?|tee|puma|adidas|nike|ck|calvin|levi|matrix|bamboo)\b", re.I),
-    "health": re.compile(r"\b(vitamin|supplement|protein\s*powder|shampoo|conditioner|lotion|soap|toothpaste|pain\s*relief|advil|tylenol|multivitamin|collagen|mouthwash|deodorant|razor|sunscreen|eye\s*drops?|floss|skin\s*care|cream|bandage)\b", re.I),
-    "home": re.compile(r"\b(pillow|sheet|blanket|duvet|towel|mat|hanger|storage|bin|basket|lamp|rug|mattress|curtain|candle|diffuser|desk|chair|furniture|mattress|pad|comforter|duvet|quilt)\b", re.I),
+    "appliances": re.compile(r"\b(toaster|blender|coffee|espresso|air\s*fryer|microwave|mixer|cookware|pan|pot|kettle|vacuum|shaver|toothbrush|fan|heater|grill|cooker|fridge|freezer|iron|steamer|ice\s*maker|juicer|food\s*processor|blender|shaver|hair\s*dryer|curling)\b", re.I),
+    "electronics": re.compile(r"\b(tv|television|monitor|speaker|headphone|earbud|soundbar|sound\s*bar|laptop|tablet|phone|iphone|galaxy|ipad|macbook|charger|cable|router|camera|smart\s*watch|projector|receiver|hdmi|usb|hub|apple|samsung|sony|bose|jbl|battery|batteries|duracell|energizer|surge|powerbank|power\s*bank)\b", re.I),
+    "groceries": re.compile(r"\b(coffee|protein|snack|meat|chicken|beef|pork|salmon|shrimp|bacon|sausage|juice|water|milk|cheese|chips|chocolate|cookie|bar|almond|rice|pasta|sauce|soup|oil|dressing|bread|cereal|yogurt|fruit|vegetable|salad|pizza|dumpling|egg|butter|nuts|honey|syrup|tea|wine|beer|spirits|kirkland|granola|tortilla|salsa|frozen|organic|crackers|oats|soda|coke|pepsi|water|torani|croissant|muffin|pie|cake|deli|ham|turkey|salami|dip|hummus|guacamole|tuna|tofu|soup|broth|ketchup|mayo|mustard|spices|seasoning)\b", re.I),
+    "household": re.compile(r"\b(paper\s*towel|toilet\s*paper|tissues?|facial\s*tissues?|detergent|dish\s*soap|trash\s*bags?|garbage\s*bags?|foil|ziploc|sponge|cleaner|disinfectant|batteries|light\s*bulb|napkins?|wipes?|laundry|fabric\s*softener|storage\s*box|container|bag|wrap|kirkland\s*signature\s*bath|tide|gain|kirkland\s*signature\s*paper|kirkland\s*signature\s*foil)\b", re.I),
+    "clothing": re.compile(r"\b(pants?|jeans|hoodie|sweatshirt|socks?|jacket|coat|shirt|shorts?|sweater|underwear|shoes?|boots?|slippers?|gloves?|hat|leggings?|t-shirt|belt|pyjamas?|tee|puma|adidas|nike|ck|calvin|levi|matrix|bamboo|under Armour|activewear|bra|boxers|briefs|slippers|pj)\b", re.I),
+    "health": re.compile(r"\b(vitamin|supplement|protein\s*powder|shampoo|conditioner|lotion|soap|toothpaste|pain\s*relief|advil|tylenol|multivitamin|collagen|mouthwash|deodorant|razor|sunscreen|eye\s*drops?|floss|skin\s*care|cream|bandage|aspirin|aleve|metamucil|magnesium|omega|b12|d3|probiotic|hair\s*growth|body\s*wash)\b", re.I),
+    "home": re.compile(r"\b(pillow|sheet|blanket|duvet|towel|mat|hanger|storage|bin|basket|lamp|rug|mattress|curtain|candle|diffuser|desk|chair|furniture|mattress|pad|comforter|duvet|quilt|sheets|bath\s*sheet|bath\s*towel|storage\s*bin|organizer|trash\s*can|blanket|throw)\b", re.I),
 }
 
 def detect_category(label: str) -> str:
