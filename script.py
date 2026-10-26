@@ -1074,33 +1074,6 @@ __CARDS__
     }).catch(function(){ cb({}); });
   }
 
-  cards.forEach(function(card) {
-    var ident = card.getAttribute('data-ident');
-    var name = card.getAttribute('data-name');
-    var trigger = card.querySelector('figcaption');
-    var skuBadge = card.querySelector('.sku-badge');
-    function showModal() {
-      modalTitle.textContent = name;
-      modalBody.innerHTML = 'Loading SKU history...';
-      modal.hidden = false;
-      fetchPriceDb(function(db) {
-        var item = db[ident];
-        if (!item || !item.history || !item.history.length) {
-          modalBody.innerHTML = '<p>No historical price data recorded yet for this item.</p>';
-          return;
-        }
-        var html = '<p style="color:var(--muted);font-size:.85rem;">Recorded Price History:</p><ul class="hist-list">';
-        item.history.slice().reverse().forEach(function(h) {
-          html += '<li class="hist-item"><span><b>' + h.date + '</b></span><span>$' + Number(h.price).toFixed(2) + (h.pct ? ' (' + h.pct + '% off)' : '') + '</span></li>';
-        });
-        html += '</ul>';
-        modalBody.innerHTML = html;
-      });
-    }
-    if (trigger) trigger.addEventListener('click', showModal);
-    if (skuBadge) skuBadge.addEventListener('click', showModal);
-  });
-
   modalClose.addEventListener('click', function() { modal.hidden = true; });
   modal.addEventListener('click', function(e) { if (e.target === modal) modal.hidden = true; });
 
