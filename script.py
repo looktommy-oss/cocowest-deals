@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Scrape CocoWest.ca for Costco posts with category tagging and filtering,
-smart date-aware post discovery, Vancouver time stamps, shopping list, store location, clearance tags, and end dates.
+smart date-aware post discovery, clean Vancouver time stamps, shopping list, store location, clearance tags, and end dates.
 
 Env overrides:
   MONDAY_URL, WEEKEND_URL      skip homepage discovery
@@ -598,8 +598,7 @@ PAGE_TEMPLATE = """<!doctype html>
 </div>
 <div class="meta">
   📍 Store Location: <b>__LOCATION__</b><br>
-  Showing <b id="shown-count">__TOTAL__</b> of <b>__TOTAL__</b> items __META_EXTRA__ &middot; updated __STAMP__<br>
-  🏷️ Clearance price = ends in .97 &middot; end-date badges are measured from today (Costco weeks run Mon&ndash;Sun)<br>
+  Showing <b id="shown-count">__TOTAL__</b> of <b>__TOTAL__</b> items &middot; updated __STAMP__<br>
   Source: <a href="__SOURCE_URL__">__SOURCE_NAME__</a>
 </div>
 <main class="grid c2" id="grid">
@@ -675,7 +674,7 @@ __CARDS__
     return n;
   }
   if (newBtn) {
-    newBtn.innerHTML = '&#10024; New only (' + countWhere(function (el) { return el.classList.contains('is-new'); }) + ')';
+    newBtn.innerHTML = '&#10024; New (' + countWhere(function (el) { return el.classList.contains('is-new'); }) + ')';
   }
   clrBtn.innerHTML = '&#127991;&#65039; Clearance (' + countWhere(function (el) { return el.classList.contains('is-clr'); }) + ')';
   weekBtn.innerHTML = '&#9200; Ends this week (' + countWhere(function (el) { return el.getAttribute('data-week') === '1'; }) + ')';
@@ -693,7 +692,7 @@ __CARDS__
       var ok = (!t || el.getAttribute('data-t').indexOf(t) !== -1) &&
                (!state.newOnly || el.classList.contains('is-new')) &&
                (!state.clrOnly || el.classList.contains('is-clr')) &&
-               (!state.weekOnly || el.getAttribute('data-week') === '1') &&
+               (!state.weekOnly || el.getAttribute('data-week'] === '1') &&
                (!state.activeCat || el.getAttribute('data-cat') === state.activeCat) &&
                (!state.listOnly || inList(el.getAttribute('data-url')));
       el.hidden = !ok;
@@ -808,7 +807,7 @@ __CARDS__
 </html>"""
 
 def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode, exclusive_urls=None) -> str:
-    stamp = datetime.now(ZoneInfo("America/Vancouver")).strftime("%Y-%m-%d %H:%M %Z")
+    stamp = datetime.now(ZoneInfo("America/Vancouver")).strftime("%b %d, %I:%M %p")
     esc = html.escape
     exclusive_urls = exclusive_urls or set()
     
@@ -818,13 +817,11 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
     if is_weekend_mode:
         page_title = "Costco Weekend Deals"
         new_btn_html = f'<button class="chip" id="new-toggle" type="button" aria-pressed="false">&#10024; New ({new_count})</button>'
-        meta_extra = f'({new_count} new exclusives highlighted)'
         source_url = weekend_url
         source_name = "Weekend Update"
     else:
         page_title = "Costco Monday Sales Post"
         new_btn_html = ''
-        meta_extra = ''
         source_url = monday_url
         source_name = "Monday Sales Post"
 
@@ -870,7 +867,6 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
             .replace("__CLR_COUNT__", str(clr_count))
             .replace("__NEW_BTN__", new_btn_html)
             .replace("__LOCATION__", esc(store_location or "Metro Vancouver Area"))
-            .replace("__META_EXTRA__", meta_extra)
             .replace("__STAMP__", stamp)
             .replace("__SOURCE_URL__", esc(source_url, quote=True))
             .replace("__SOURCE_NAME__", source_name)
