@@ -1061,56 +1061,6 @@ __CARDS__
       });
     }
 
-            if (records.length > 0) {
-              renderHistoryList(records);
-            } else if (item && item.history && item.history.length) {
-              renderHistoryList(item.history);
-            } else {
-              modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price table found on item page.</p>';
-            }
-          })
-          .catch(function(err) {
-            if (item && item.history) {
-              renderHistoryList(item.history);
-            } else {
-              modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Could not load live history.</p>';
-            }
-          });
-
-            if (records.length > 0) {
-              renderHistoryList(records);
-            } else if (item && item.history && item.history.length) {
-              renderHistoryList(item.history);
-            } else {
-              modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price table found on item page.</p>';
-            }
-          })
-          .catch(function(err) {
-            if (item && item.history) {
-              renderHistoryList(item.history);
-            } else {
-              modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Could not load live history.</p>';
-            }
-          });
-
-            if (records.length > 0) {
-              renderHistoryList(records);
-            } else if (item && item.history && item.history.length) {
-              renderHistoryList(item.history);
-            } else {
-              modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price table found on item page.</p>';
-            }
-          })
-          .catch(function(err) {
-            if (item && item.history) {
-              renderHistoryList(item.history);
-            } else {
-              modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Could not load live history.</p>';
-            }
-          });
-      });
-    }
-
     if (trigger) trigger.addEventListener('click', showModal);
     if (skuBadge) skuBadge.addEventListener('click', showModal);
   });
