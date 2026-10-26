@@ -565,7 +565,7 @@ def scrape_cocowest_item_history(scraper, item_no: str):
         return []
 
 def update_price_db(scraper, prev_state, target_items, valid_range):
-    """Accumulates SKU price history, deep-scraping cocowest.ca/item/<sku> ONCE per SKU."""
+    """Accumulates SKU price history, deep-scraping cocowest.ca/item/<sku> when needed."""
     db = dict(prev_state.get("price_db") or {})
     today_str = datetime.now(ZoneInfo("America/Vancouver")).strftime("%Y-%m-%d")
     date_label = valid_range[0].isoformat() if valid_range else today_str
@@ -576,8 +576,8 @@ def update_price_db(scraper, prev_state, target_items, valid_range):
         pct = discount_pct(i.label)
         entry = db.get(ident, {"name": i.label, "item_no": i.item_no, "history": [], "full_scraped": False})
 
-        # Deep scrape history from CocoWest item page ONCE if we haven't already
-        if i.item_no and not entry.get("full_scraped"):
+        # Re-scrape if we have an item number and fewer than 2 history points recorded yet
+        if i.item_no and (not entry.get("full_scraped") or len(entry.get("history", [])) <= 1):
             print(f"[history] Deep scraping CocoWest price history for SKU {i.item_no}...")
             remote_records = scrape_cocowest_item_history(scraper, i.item_no)
             if remote_records:
@@ -587,7 +587,7 @@ def update_price_db(scraper, prev_state, target_items, valid_range):
                         entry["history"].append(r)
                 entry["history"].sort(key=lambda x: x["date"])
             entry["full_scraped"] = True
-            time.sleep(random.uniform(0.5, 1.0)) # polite delay
+            time.sleep(random.uniform(0.5, 1.0))
 
         if price is not None:
             hist = entry["history"]
