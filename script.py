@@ -145,23 +145,71 @@ def fmt_range(rng) -> str:
     right = f"{e.day}" if same_month else f"{e.strftime('%b')} {e.day}"
     return f"{left} &ndash; {right}"
 
-def weekend_over(rng, forced: bool, today) -> bool:
-    effective_today = today - timedelta(days=1) if today.weekday() == 0 else today
-    return (not forced) and bool(rng) and rng[1] < effective_today
+def sunday_on_or_after(d):
+    return d + timedelta(days=(6 - d.weekday()) % 7)
+
+def published_date_from_html(post_html: str):
+    """Date a post was published (Vancouver time), read from the page's metadata."""
+    soup = BeautifulSoup(post_html, "html.parser")
+    candidates = []
+    for prop in ("article:published_time", "og:article:published_time"):
+        meta = soup.find("meta", property=prop)
+        if meta and meta.get("content"):
+            candidates.append(meta["content"])
+    art_time = soup.select_one("article time[datetime]")
+    if art_time:
+        candidates.append(art_time["datetime"])
+    for c in candidates:
+        try:
+            dt = datetime.fromisoformat(c.strip().replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(ZoneInfo("America/Vancouver")).date()
+    return None
+
+def reconcile_range(title_range, pub_date):
+    """Trust the dates in the title unless they end before the post was even published.
+    The author sometimes reuses last week's title/URL for a new post; in that case fall
+    back to 'published date through that Sunday'."""
+    if pub_date is None:
+        return title_range
+    if title_range and title_range[1] >= pub_date:
+        return title_range
+    return (pub_date, sunday_on_or_after(pub_date))
+
+def weekend_over(rng, forced: bool, today, monday_range=None) -> bool:
+    """True when the weekend post should no longer be shown.
+    It's over once its dates have passed AND either this week's Monday post is up,
+    or a one-day grace period (the Monday after) has run out."""
+    if forced or not rng:
+        return False
+    if rng[1] >= today:
+        return False
+    if monday_range and monday_range[0] > rng[1]:
+        return True
+    return today > rng[1] + timedelta(days=1)
 
 def discover_posts(home_html: str):
     soup = BeautifulSoup(home_html, "html.parser")
-    seen = set()
-    all_posts = []
-
+    texts = {}   # href -> longest visible text seen for that link (title link beats thumbnail)
+    order = []
     for a in soup.find_all("a", href=True):
         href = urljoin(BASE_URL, a["href"]).split("#")[0]
-        if href in seen or not is_post_link(href):
+        if not is_post_link(href):
             continue
-        seen.add(href)
-        blob = " ".join([a.get_text(" ", strip=True), a.get("title", ""),
-                         a.get("aria-label", ""), urlparse(href).path.replace("-", " ")])
-        all_posts.append((href, blob))
+        text = " ".join([a.get_text(" ", strip=True), a.get("title", ""),
+                         a.get("aria-label", "")]).strip()
+        if href not in texts:
+            texts[href] = text
+            order.append(href)
+        elif len(text) > len(texts[href]):
+            texts[href] = text
+
+    # Visible title text first, URL words last. The author sometimes reuses last week's
+    # URL for a new post, so dates found in the URL are only a fallback.
+    all_posts = [(h, f"{texts[h]} {urlparse(h).path.replace('-', ' ')}") for h in order]
 
     weekend_env = os.getenv("WEEKEND_URL")
     monday_env = os.getenv("MONDAY_URL")
@@ -1444,7 +1492,8 @@ def main() -> int:
 
     print(f"Base Flyer/Sales Post: {monday_url}")
     monday_html = fetch(scraper, monday_url)
-    monday_range = ranges.get("monday") or range_from_html(monday_html)
+    monday_range = reconcile_range(ranges.get("monday") or range_from_html(monday_html),
+                                   published_date_from_html(monday_html))
     monday_items = extract_items(monday_html, monday_url)
 
     if not monday_items:
@@ -1455,9 +1504,6 @@ def main() -> int:
 
     weekend_range = ranges.get("weekend")
     is_weekend_mode = bool(weekend_url)
-    if is_weekend_mode and weekend_over(weekend_range, weekend_forced, today):
-        print(f"Weekend post ended {weekend_range[1]}; using the Monday post instead.")
-        is_weekend_mode = False
     weekend_items = []
     exclusive = []
     exclusive_urls = set()
@@ -1466,8 +1512,9 @@ def main() -> int:
         print(f"Weekend Update: {weekend_url}")
         time.sleep(random.uniform(1, 3))
         weekend_html = fetch(scraper, weekend_url)
-        weekend_range = weekend_range or range_from_html(weekend_html)
-        if weekend_over(weekend_range, weekend_forced, today):
+        weekend_range = reconcile_range(weekend_range or range_from_html(weekend_html),
+                                        published_date_from_html(weekend_html))
+        if weekend_over(weekend_range, weekend_forced, today, monday_range):
             print(f"Weekend post ended {weekend_range[1]}; using the Monday post instead.")
             weekend_items = []
         else:
