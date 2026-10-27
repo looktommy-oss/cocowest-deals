@@ -646,7 +646,7 @@ def build_digest(items, exclusive, is_weekend_mode):
     with_disc = sorted((i for i in items if discount_pct(i.label)),
                        key=lambda i: discount_pct(i.label), reverse=True)
     if with_disc:
-        sections.append("BIGGEST DISCOUNTS\n" + "\n".join(digest_line(i) for i in with_disc[:5]))
+        sections.append("BIGGEST DISCOUNTS\n" + "\n".join(digest_line(i) for i in with_disc[:10]))
 
     if is_weekend_mode and exclusive:
         top_new = sorted(exclusive, key=lambda i: discount_pct(i.label) or 0, reverse=True)[:5]
@@ -654,7 +654,7 @@ def build_digest(items, exclusive, is_weekend_mode):
 
     clearance = [i for i in items if is_clearance(i.label)]
     if clearance:
-        shown = clearance[:8]
+        shown = clearance[:5]
         extra = len(clearance) - len(shown)
         text = "CLEARANCE FINDS (.97 prices)\n" + "\n".join(digest_line(i) for i in shown)
         if extra > 0:
