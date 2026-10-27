@@ -1228,7 +1228,7 @@ __CARDS__
     if (!items.length) return;
     var sum = 0;
     items.forEach(function (el) { var p = num(el, 'data-price'); if (p !== null) sum += p; });
-    var head = 'My Costco shopping list (' + items.length + ' item' + (items.length === 1 ? '' : 's') + '):' + NL + NL +
+    var head = 'My Costco shopping list (' + items.length + ' item' + (items.length === 1 ? '' : 's' ) + '):' + NL + NL +
                'Open it on the site: ' + shareUrl() + NL + NL;
     var tail = NL + 'Total: $' + sum.toFixed(2);
     var lines = [];
@@ -1370,7 +1370,7 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
     exclusive_urls = exclusive_urls or set()
     seen_ids = seen_ids or set()
     
-    sale_count = sum(1 for i in items if discount_pct(i.label) is not None or price_value(i.label) is not None)
+    sale_count = sum(1 for i in items if discount_pct(i.label) is not None)
     clr_count = sum(1 for i in items if is_clearance(i.label))
     new_count = len(exclusive_urls)
     repeat_count = sum(1 for i in items if item_ident(i) in seen_ids)
@@ -1405,7 +1405,7 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
     for n, i in enumerate(items):
         is_new = i.url in exclusive_urls
         clearance = is_clearance(i.label)
-        has_sale = discount_pct(i.label) is not None or price_value(i.label) is not None
+        has_sale = discount_pct(i.label) is not None
         end = parse_end_date(i.label)
         pct = discount_pct(i.label)
         price = price_value(i.label)
