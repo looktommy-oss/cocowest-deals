@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Scrape CocoWest.ca for Costco posts with robust category tagging and filtering,
-smart date-aware post discovery, Vancouver time stamps, shopping list, store location,
-clearance tags, end dates, discount % badges, sorting, list totals, emailable/shareable
-shopping list, repeat-item markers, permanent post archiving, and local price history tracking.
+Scrape CocoWest.ca for Costco posts with scored category tagging, smart date-aware
+post discovery, Vancouver timestamps, Cart + Save-for-Next-Week shopping list,
+custom/historical item search, compact no-image checklist mode, BC tax estimator,
+all-time-low badges, and embedded price history.
 """
 import html
 import json
@@ -15,37 +15,54 @@ import ssl
 import sys
 import time
 from collections import Counter
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 from difflib import SequenceMatcher
 from email.message import EmailMessage
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
+from zoneinfo import ZoneInfo
 
 import cloudscraper
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://www.cocowest.ca/"
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "public"))
-ARCHIVE_DIR = OUTPUT_DIR / "archives"
 DEBUG = os.getenv("DEBUG") == "1"
-MATCH_MODE = os.getenv("MATCH_MODE", "smart").lower()
 
 _owner, _, _repo = os.getenv("GITHUB_REPOSITORY", "").partition("/")
 SITE_URL = os.getenv("SITE_URL") or (
-    f"https://{_owner.lower()}.github.io/{_repo}/" if _owner and _repo else "")
+    f"https://{_owner.lower()}.github.io/{_repo}/" if _owner and _repo else ""
+)
 if SITE_URL and not SITE_URL.endswith("/"):
     SITE_URL += "/"
 STATE_URL = SITE_URL + "state.json" if SITE_URL else ""
 
-WEEKEND_RE = re.compile(os.getenv("WEEKEND_RE", r"weekend[-_\s]*(?:sales[-_\s]*)?update"), re.I)
-IGNORE_RE = re.compile(r"(seasonal|electronics|food[-_\s]review|review|recall|contest|clothing|executive|black[-_\s]friday|boxing[-_\s]day)", re.I)
+WEEKEND_RE = re.compile(
+    os.getenv("WEEKEND_RE", r"weekend[-_\s]*(?:sales[-_\s]*)?update"), re.I
+)
+IGNORE_RE = re.compile(
+    r"(seasonal|electronics|food[-_\s]review|review|recall|contest|clothing|executive|black[-_\s]friday|boxing[-_\s]day)",
+    re.I,
+)
+SALES_POST_RE = re.compile(r"(costco[-_\s]+flyer|sale[-_\s]+items)", re.I)
 
 FUZZY_THRESHOLD = 0.92
 
-CHALLENGE_MARKERS = ("just a moment", "cf-browser-verification", "challenge-platform",
-                     "attention required", "enable javascript and cookies")
+CHALLENGE_MARKERS = (
+    "just a moment",
+    "cf-browser-verification",
+    "challenge-platform",
+    "attention required",
+    "enable javascript and cookies",
+)
+
+SKIP_PATH_PREFIXES = (
+    "/category/", "/tag/", "/page/", "/author/", "/wp-", "/feed",
+    "/comments", "/search", "/about", "/contact", "/privacy",
+    "-review/", "/register", "/terms", "/faq", "/disclaimer",
+)
+
 
 def make_scraper():
     return cloudscraper.create_scraper(
@@ -53,16 +70,19 @@ def make_scraper():
         delay=10,
     )
 
+
 def looks_like_challenge(text: str) -> bool:
     head = text[:6000].lower()
     return any(m in head for m in CHALLENGE_MARKERS)
+
 
 def fetch(scraper, url: str, retries: int = 4) -> str:
     last = None
     for attempt in range(1, retries + 1):
         try:
             r = scraper.get(
-                url, timeout=45,
+                url,
+                timeout=45,
                 headers={"Accept-Language": "en-CA,en;q=0.9", "Referer": BASE_URL},
             )
             if r.status_code == 200 and not looks_like_challenge(r.text):
@@ -70,14 +90,14 @@ def fetch(scraper, url: str, retries: int = 4) -> str:
             last = f"HTTP {r.status_code}, challenge={looks_like_challenge(r.text)}"
         except Exception as exc:
             last = repr(exc)
-        wait = 2 ** attempt + random.random() * 2
-        print(f"[fetch] {url} attempt {attempt}/{retries} failed ({last}); sleeping {wait:.1f}s", file=sys.stderr)
+        wait = 2**attempt + random.random() * 2
+        print(
+            f"[fetch] {url} attempt {attempt}/{retries} failed ({last}); sleeping {wait:.1f}s",
+            file=sys.stderr,
+        )
         time.sleep(wait)
     raise RuntimeError(f"Could not fetch {url}: {last}")
 
-SKIP_PATH_PREFIXES = ("/category/", "/tag/", "/page/", "/author/", "/wp-", "/feed",
-                     "/comments", "/search", "/about", "/contact", "/privacy",
-                     "-review/", "/register", "/terms", "/faq", "/disclaimer")
 
 def is_post_link(href: str) -> bool:
     u = urlparse(href)
@@ -89,22 +109,30 @@ def is_post_link(href: str) -> bool:
         return False
     return not re.search(r"\.(jpe?g|png|gif|webp|pdf|xml)$", path, re.I)
 
-SALES_POST_RE = re.compile(r"(costco[-_\s]+flyer|sale[-_\s]+items)", re.I)
 
-_MONTH_NAMES = ("january", "february", "march", "april", "may", "june", "july", "august",
-                "september", "october", "november", "december")
-_MONTH_ALIASES = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7, "aug": 8,
-                  "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12}
-_MONTH_PAT = "|".join(_MONTH_NAMES + tuple(sorted(_MONTH_ALIASES, key=len, reverse=True)))
+_MONTH_NAMES = (
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+)
+_MONTH_ALIASES = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7,
+    "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+_MONTH_PAT = "|".join(
+    _MONTH_NAMES + tuple(sorted(_MONTH_ALIASES, key=len, reverse=True))
+)
 RANGE_RE = re.compile(
     rf"\b({_MONTH_PAT})\.?\s+(\d{{1,2}})(?:\s*[-–—]\s*|\s+)(?:({_MONTH_PAT})\.?\s+)?(\d{{1,2}})[,\s]+(\d{{4}})",
-    re.I)
+    re.I,
+)
+
 
 def _month_num(name: str):
     n = (name or "").lower().rstrip(".")
     if n in _MONTH_NAMES:
         return _MONTH_NAMES.index(n) + 1
     return _MONTH_ALIASES.get(n)
+
 
 def parse_range(text: str):
     m = RANGE_RE.search(text or "")
@@ -121,8 +149,8 @@ def parse_range(text: str):
         return None
     return (start, end) if start <= end else None
 
-def range_from_html(post_html: str):
-    soup = BeautifulSoup(post_html, "html.parser")
+
+def range_from_soup(soup: BeautifulSoup):
     texts = []
     h1 = soup.find("h1")
     if h1:
@@ -138,6 +166,7 @@ def range_from_html(post_html: str):
             return r
     return None
 
+
 def fmt_range(rng) -> str:
     s, e = rng
     left = f"{s.strftime('%b')} {s.day}"
@@ -145,11 +174,12 @@ def fmt_range(rng) -> str:
     right = f"{e.day}" if same_month else f"{e.strftime('%b')} {e.day}"
     return f"{left} &ndash; {right}"
 
+
 def sunday_on_or_after(d):
     return d + timedelta(days=(6 - d.weekday()) % 7)
 
-def published_date_from_html(post_html: str):
-    soup = BeautifulSoup(post_html, "html.parser")
+
+def published_date_from_soup(soup: BeautifulSoup):
     candidates = []
     for prop in ("article:published_time", "og:article:published_time"):
         meta = soup.find("meta", property=prop)
@@ -168,12 +198,14 @@ def published_date_from_html(post_html: str):
         return dt.astimezone(ZoneInfo("America/Vancouver")).date()
     return None
 
+
 def reconcile_range(title_range, pub_date):
     if pub_date is None:
         return title_range
     if title_range and title_range[1] >= pub_date:
         return title_range
     return (pub_date, sunday_on_or_after(pub_date))
+
 
 def weekend_over(rng, forced: bool, today, monday_range=None) -> bool:
     if forced or not rng:
@@ -184,6 +216,7 @@ def weekend_over(rng, forced: bool, today, monday_range=None) -> bool:
         return True
     return today > rng[1] + timedelta(days=1)
 
+
 def discover_posts(home_html: str):
     soup = BeautifulSoup(home_html, "html.parser")
     texts = {}
@@ -192,8 +225,9 @@ def discover_posts(home_html: str):
         href = urljoin(BASE_URL, a["href"]).split("#")[0]
         if not is_post_link(href):
             continue
-        text = " ".join([a.get_text(" ", strip=True), a.get("title", ""),
-                         a.get("aria-label", "")]).strip()
+        text = " ".join(
+            [a.get_text(" ", strip=True), a.get("title", ""), a.get("aria-label", "")]
+        ).strip()
         if href not in texts:
             texts[href] = text
             order.append(href)
@@ -204,8 +238,10 @@ def discover_posts(home_html: str):
     weekend_env = os.getenv("WEEKEND_URL")
     monday_env = os.getenv("MONDAY_URL")
 
-    entries = [{"href": h, "blob": b, "order": n, "range": parse_range(b)}
-               for n, (h, b) in enumerate(all_posts)]
+    entries = [
+        {"href": h, "blob": b, "order": n, "range": parse_range(b)}
+        for n, (h, b) in enumerate(all_posts)
+    ]
 
     def newest(cands):
         dated = [c for c in cands if c["range"]]
@@ -218,12 +254,19 @@ def discover_posts(home_html: str):
     weekend_range = weekend_pick["range"] if weekend_pick else None
 
     def is_candidate(e):
-        return (e["href"] != weekend_url
-                and not WEEKEND_RE.search(e["blob"])
-                and not IGNORE_RE.search(e["blob"]))
+        return (
+            e["href"] != weekend_url
+            and not WEEKEND_RE.search(e["blob"])
+            and not IGNORE_RE.search(e["blob"])
+        )
 
-    monday_pick = newest([e for e in entries
-                          if is_candidate(e) and e["range"] and SALES_POST_RE.search(e["blob"])])
+    monday_pick = newest(
+        [
+            e
+            for e in entries
+            if is_candidate(e) and e["range"] and SALES_POST_RE.search(e["blob"])
+        ]
+    )
     if not monday_pick:
         monday_pick = next((e for e in entries if is_candidate(e)), None)
 
@@ -238,30 +281,272 @@ def discover_posts(home_html: str):
 
     return monday_url, weekend_url, {"monday": monday_range, "weekend": weekend_range}
 
+
 IMG_URL_RE = re.compile(
     r"^(https?:)?//\S+?\.(jpe?g|png|webp|gif|avif)(\?\S*)?$|^/\S+?\.(jpe?g|png|webp|gif|avif)(\?\S*)?$",
-    re.I)
-KNOWN_LAZY_ATTRS = ("data-src", "data-lazy-src", "data-original", "data-orig-file",
-                    "data-large-file", "data-full-url", "data-lazy", "data-img-src")
+    re.I,
+)
+KNOWN_LAZY_ATTRS = (
+    "data-src", "data-lazy-src", "data-original", "data-orig-file",
+    "data-large-file", "data-full-url", "data-lazy", "data-img-src",
+)
 SRCSET_ATTRS = ("data-srcset", "data-lazy-srcset", "srcset")
-CONTAINER_SELECTORS = ("article .entry-content", ".entry-content", ".post-content",
-                       ".single-content", "article", "main", "#content")
+CONTAINER_SELECTORS = (
+    "article .entry-content", ".entry-content", ".post-content",
+    ".single-content", "article", "main", "#content",
+)
 
 BAD_FILENAME_RE = re.compile(
     r"(logo|banner|avatar|gravatar|icon|sprite|emoji|placeholder|spinner|loader|"
     r"button|badge|social|facebook|twitter|instagram|pinterest|youtube|tiktok|"
     r"advert|sponsor|cropped-|blank|pixel|1x1|spacer|newsletter|subscribe|"
-    r"next-week|what-is-on-sale|sale-next-week|promo-header)", re.I)
-BAD_HOSTS = ("gravatar.com", "s.w.org", "doubleclick.net", "googlesyndication.com",
-             "facebook.com", "facebook.net", "google-analytics.com")
+    r"next-week|what-is-on-sale|sale-next-week|promo-header)",
+    re.I,
+)
+BAD_HOSTS = (
+    "gravatar.com", "s.w.org", "doubleclick.net", "googlesyndication.com",
+    "facebook.com", "facebook.net", "google-analytics.com",
+)
 BAD_CLASS_RE = re.compile(
     r"(sidebar|widget|comment|related|share|social|author|menu|logo|banner|"
-    r"(^|[-_ ])(ads?|advert\w*|sponsor\w*)($|[-_ ])|newsletter|subscribe|breadcrumb)", re.I)
-GENERIC_ALT_RE = re.compile(r"^(img|image|photo|picture|screenshot|dsc|pxl|p|untitled)?[\s_-]*\d*$", re.I)
-GENERIC_NAME_RE = re.compile(r"^(img|image|photo|dsc|pxl|screenshot|untitled|p)?\d*$", re.I)
+    r"(^|[-_ ])(ads?|advert\w*|sponsor\w*)($|[-_ ])|newsletter|subscribe|breadcrumb)",
+    re.I,
+)
+GENERIC_ALT_RE = re.compile(
+    r"^(img|image|photo|picture|screenshot|dsc|pxl|p|untitled)?[\s_-]*\d*$", re.I
+)
+GENERIC_NAME_RE = re.compile(
+    r"^(img|image|photo|dsc|pxl|screenshot|untitled|p)?\d*$", re.I
+)
+FILE_SUFFIX_RE = re.compile(
+    r"(?:-\d{2,4}x\d{2,4}|-(?:scaled|rotated|edited|copy|min|large|medium|thumbnail)|[-_]\d{1,2})+$",
+    re.I,
+)
+NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 ALT_ITEM_NO_RE = re.compile(r"^\s*(\d{5,8})\b")
 FILE_ITEM_NO_RE = re.compile(r"^(\d{5,8})[-_]")
+
+PRICE_RE = re.compile(r"\$\s?(\d[\d,]*)\.(\d{2})\b")
+PAREN_RE = re.compile(r"\([^)]*\)")
+END_RE = re.compile(
+    r"(?:EXPIRES|ENDS|VALID\s+(?:UNTIL|THROUGH|THRU))\s+(?:ON\s+)?(\d{4}-\d{2}-\d{2})",
+    re.I,
+)
+
+MONEY = r"\$\s?(\d[\d,]*(?:\.\d{1,2})?)"
+SAVE_RE = re.compile(
+    r"\b(?:you\s+)?(?:instant\s+)?(?:save|savings?)\s*(?:of\s*)?:?\s*" + MONEY, re.I
+)
+OFF_RE = re.compile(
+    MONEY + r"\s*(?:off|instant\s+savings?|savings?|discount)\b", re.I
+)
+REG_RE = re.compile(
+    r"\b(?:reg(?:ular)?|was|orig(?:inal)?)\.?\s*(?:price)?\s*:?\s*" + MONEY, re.I
+)
+PCT_OFF_RE = re.compile(r"\b(\d{1,2})\s*%\s*off\b", re.I)
+FLYER_RE = re.compile(r"costco\s*1", re.I)
+
+# 1. High-priority multi-word overrides checked first to prevent category hijacking
+CATEGORY_OVERRIDES = (
+    (re.compile(r"\b(sound\s*bar|apple\s*watch|apple\s*tv|apple\s*airpods?|apple\s*ipad|apple\s*macbook|apple\s*pencil|surge\s*protector|power\s*bank|dash\s*cam|memory\s*card|sd\s*card|gift\s*card)\b", re.I), "electronics"),
+    (re.compile(r"\b(water\s*flosser|waterpik|body\s*butter|body\s*wash|hand\s*soap|hand\s*cream|face\s*cream|eye\s*cream|shave\s*cream|shaving\s*cream|lip\s*balm|tea\s*tree|epsom\s*salt|milk\s*thistle|protein\s*powder|whey\s*protein|collagen\s*peptides?|electrolyte\s*powder|liquid\s*i\.?v\.?|contact\s*lens|heating\s*pad)\b", re.I), "health"),
+    (re.compile(r"\b(motor\s*oil|synthetic\s*oil|windshield\s*wash|wiper\s*blade|cat\s*litter|dog\s*food|cat\s*food|dog\s*treats?|cat\s*treats?|pee\s*pads?|dish\s*soap|laundry\s*detergent|dishwasher\s*tabs?|dishwasher\s*pods?|dryer\s*sheets?|garbage\s*bags?|trash\s*bags?|food\s*wrap|parchment\s*paper|aluminum\s*foil|furnace\s*filter)\b", re.I), "household"),
+    (re.compile(r"\b(bar\s*stool|towel\s*bar|towel\s*warmer|tea\s*towel|bath\s*towel|bath\s*mat|welcome\s*mat|area\s*rug|bed\s*frame|picture\s*frame|sleeping\s*bag|duffel\s*bag|garment\s*bag|luggage|step\s*stool|folding\s*table|folding\s*chair|office\s*chair|gaming\s*chair|patio\s*umbrella|fire\s*pit|water\s*bottle|travel\s*mug)\b", re.I), "home"),
+    (re.compile(r"\b(water\s*pitcher|brita|air\s*purifier|water\s*cooler|ice\s*maker|coffee\s*maker|espresso\s*machine|rice\s*cooker|slow\s*cooker|pressure\s*cooker|air\s*fryer|stand\s*mixer|hand\s*mixer|immersion\s*blender|food\s*processor|food\s*saver|vacuum\s*sealer|bread\s*maker|waffle\s*maker)\b", re.I), "appliances"),
+)
+
+# 2. Expanded keyword rules (scored by total keyword matches)
+CATEGORY_RULES = {
+    "groceries": re.compile(
+        r"\b(coffee|espresso\s*beans|k-?cup|nescafe|starbucks|tim\s*hortons|tea|matcha|chai|kombucha|"
+        r"snack|meat|chicken|beef|pork|salmon|shrimp|prawn|halibut|cod|tilapia|trout|tuna|lobster|crab|scallop|mussel|calamari|sushi|"
+        r"bacon|sausage|wiener|hot\s*dog|pepperoni|salami|prosciutto|pancetta|chorizo|ham|turkey|deli|roast|steak|striploin|ribeye|sirloin|tenderloin|brisket|ribs|wings|meatball|burger|kebab|souvlaki|gyro|"
+        r"juice|lemonade|smoothie|milk|oat\s*milk|almond\s*milk|coconut\s*milk|cream\s*cheese|sour\s*cream|whipping\s*cream|creamer|half\s*&\s*half|butter|ghee|margarine|egg|yogurt|kefir|"
+        r"cheese|cheddar|mozzarella|parmesan|brie|gouda|feta|havarti|provolone|swiss|halloumi|paneer|queso|babybel|laughing\s*cow|boursin|"
+        r"chips|doritos|lays|ruffles|pringles|cheetos|tostitos|miss\s*vickie|popcorn|pretzel|cracker|ritz|triscuit|wheat\s*thin|goldfish|rice\s*cake|jerky|biltong|pork\s*rind|"
+        r"chocolate|lindt|ferrero|ghirardelli|godiva|kit\s*kat|reeses|snickers|mars|twix|m&m|gummy|candy|licorice|caramel|toffee|fudge|marshmallow|mint|gum|"
+        r"cookie|oreo|biscotti|shortbread|brownie|macaron|muffin|croissant|danish|scone|bagel|brioche|bread|loaf|sourdough|ciabatta|baguette|flatbread|naan|pita|tortilla|wrap|english\s*muffin|pancake|waffle|crepe|pie|cake|cheesecake|tiramisu|strudel|strudels|tart|donut|churro|"
+        r"cereal|cheerios|granola|oats|oatmeal|quaker|porridge|muesli|granola\s*bar|protein\s*bar|clif|kind\s*bar|rxbar|nature\s*valley|nutri-?grain|"
+        r"almond|cashew|pistachio|walnut|pecan|macadamia|hazelnut|peanut|mixed\s*nuts|trail\s*mix|pumpkin\s*seed|sunflower|chia|flax|hemp|raisin|cranberry|date|fig|prune|apricot|"
+        r"rice|jasmine|basmati|quinoa|couscous|barley|lentil|chickpea|beans?|pasta|spaghetti|penne|macaroni|fettuccine|lasagna|ravioli|tortellini|gnocchi|noodle|ramen|udon|pho|vermicelli|"
+        r"sauce|marinara|pesto|alfredo|salsa|guacamole|hummus|tzatziki|dip|ketchup|mustard|mayo|mayonnaise|aioli|relish|bbq|teriyaki|soy\s*sauce|tamari|sriracha|hot\s*sauce|vinegar|balsamic|olive\s*oil|avocado\s*oil|canola\s*oil|coconut\s*oil|sesame\s*oil|cooking\s*spray|dressing|marinade|"
+        r"soup|broth|stock|bouillon|chili|stew|curry|chowder|"
+        r"flour|sugar|sweetener|stevia|erythritol|honey|maple\s*syrup|agave|jam|jelly|preserve|peanut\s*butter|almond\s*butter|nutella|tahini|cocoa|baking|yeast|vanilla|spice|seasoning|garlic\s*powder|cinnamon|peppercorn|sea\s*salt|himalayan\s*salt|"
+        r"fruit|apple|banana|orange|mandarin|clementine|grapefruit|lemon|lime|berry|strawberry|blueberry|raspberry|blackberry|grape|cherry|peach|pear|plum|mango|pineapple|melon|watermelon|kiwi|avocado|tomato|"
+        r"vegetable|salad|lettuce|spinach|kale|arugula|coleslaw|broccoli|cauliflower|asparagus|brussels|celery|carrot|cucumber|zucchini|pepper|mushroom|onion|garlic|potato|sweet\s*potato|fries|hash\s*brown|tater|corn|peas|edamame|tofu|tempeh|kimchi|sauerkraut|pickle|olive|caper|"
+        r"pizza|dumpling|gyoza|wonton|potsticker|spring\s*roll|egg\s*roll|samosa|spanakopita|quiche|burrito|taquito|empanada|perogy|pierogi|poutine|"
+        r"ice\s*cream|gelato|sorbet|popsicle|haagen|magnum|drumstick|frozen\s*yogurt|"
+        r"soda|coke|coca-?cola|pepsi|sprite|7up|ginger\s*ale|root\s*beer|dr\s*pepper|canada\s*dry|bubly|perrier|san\s*pellegrino|sparkling\s*water|spring\s*water|coconut\s*water|red\s*bull|monster|celsius|alani|gatorade|powerade|prime|torani|wine|beer|spirits|liquor|vodka|whisky|gin|rum|tequila|prosecco|champagne)\b",
+        re.I,
+    ),
+    "appliances": re.compile(
+        r"\b(toaster|blender|vitamix|nutribullet|ninja|espresso|keurig|nespresso|breville|delonghi|cuisinart|kitchenaid|"
+        r"air\s*fryer|microwave|mixer|cookware|pan|skillet|wok|frying\s*pan|saucepan|stockpot|dutch\s*oven|cast\s*iron|griddle|baking\s*sheet|bakeware|henckels|zwilling|tramontina|all-?clad|t-?fal|circulon|meyer|pyrex|corningware|knives|knife\s*set|knife\s*block|"
+        r"kettle|tiger|zojirushi|vacuum|dyson|shark|roomba|irobot|roborock|tineco|bissell|hoover|shop-?vac|carpet\s*cleaner|steam\s*mop|"
+        r"shaver|braun|norelco|philips\s*shaver|trimmer|wahl|toothbrush|sonicare|oral-?b\s*io|"
+        r"fan|woozo|vornado|lasko|heater|air\s*conditioner|portable\s*ac|dehumidifier|humidifier|air\s*purifier|winix|levoit|blueair|"
+        r"grill|weber|traeger|blackstone|masterbuilt|smoker|cooker|instant\s*pot|crock-?pot|sous\s*vide|"
+        r"fridge|refrigerator|freezer|beverage\s*center|wine\s*cooler|danby|hisense|midea|frigidaire|whirlpool|"
+        r"iron|garment\s*steamer|conair|hair\s*dryer|blow\s*dryer|straightener|curling\s*iron|revlon|sodastream|ice\s*maker|juicer|food\s*processor|panini)\b",
+        re.I,
+    ),
+    "electronics": re.compile(
+        r"\b(tv|television|oled|qled|uhd|4k|8k|mini-?led|monitor|display|ultrawide|"
+        r"speaker|headphone|earbud|earphone|soundbar|subwoofer|receiver|amplifier|turntable|"
+        r"laptop|notebook|chromebook|macbook|imac|mac\s*mini|desktop|pc|all-?in-?one|tablet|ipad|surface|kindle|e-?reader|"
+        r"phone|smartphone|iphone|galaxy|pixel|motorola|unlocked|"
+        r"charger|magsafe|cable|lightning|usb-?c|thunderbolt|hdmi|adapter|dock|docking\s*station|hub|"
+        r"router|mesh\s*wi-?fi|modem|ethernet|tp-?link|deco|netgear|orbi|eero|asus\s*wifi|"
+        r"camera|webcam|dslr|mirrorless|canon|nikon|gopro|insta360|dji|drone|dash\s*cam|security\s*camera|ring|blink|arlo|reolink|lorex|doorbell|"
+        r"smart\s*watch|garmin|fitbit|apple\s*watch|galaxy\s*watch|airtag|tracker|"
+        r"projector|airpods?|samsung|sony|bose|jbl|sonos|klipsch|shokz|jabra|beats|skullcandy|sennheiser|"
+        r"battery|batteries|duracell|energizer|ups|cyberpower|apc|surge|power\s*bank|anker|belkin|"
+        r"ssd|hard\s*drive|nvme|flash\s*drive|thumb\s*drive|microsd|sandisk|seagate|western\s*digital|lexar|"
+        r"fire\s*stick|roku|chromecast|apple\s*tv|nintendo|playstation|ps5|xbox|meta\s*quest|joy-?con|controller|gaming\s*headset|gaming\s*mouse|mechanical\s*keyboard|razer|logitech|corsair|hyperx|printer|epson|brother|hp\s*envy|hp\s*laserjet|ink\s*cartridge|toner)\b",
+        re.I,
+    ),
+    "household": re.compile(
+        r"\b(paper\s*towel|bounty|sponge\s*towel|toilet\s*paper|bath\s*tissue|charmin|cashmere|royale|scott|facial\s*tissue|kleenex|scotties|napkins?|"
+        r"detergent|tide|gain|persil|purex|woolite|downy|bounce|fabric\s*softener|scent\s*booster|unstopables|oxiclean|resolve|stain\s*remover|bleach|clorox|"
+        r"dish\s*soap|dawn|palmolive|cascade|finish|jet-?dry|rinse\s*aid|dishwasher|"
+        r"trash\s*bag|garbage\s*bag|glad|hefty|compost\s*bag|foil|alcan|reynolds|ziploc|freezer\s*bag|sandwich\s*bag|parchment|cling\s*wrap|saran|press'n\s*seal|"
+        r"sponge|scotch-?brite|scrub\s*daddy|microfiber|swiffer|vileda|o-?cedar|mop|broom|dustpan|duster|lint\s*roller|"
+        r"cleaner|disinfectant|lysol|mr\.\s*clean|pine-?sol|windex|pledge|febreze|air\s*wick|glade|vim|comet|barkeepers|clr|drain\s*cleaner|drano|toilet\s*bowl|"
+        r"storage\s*container|food\s*storage|snapware|rubbermaid|sistema|cambro|tupperware|mason\s*jar|"
+        r"light\s*bulb|led\s*bulb|feit|filtrete|furnace\s*filter|air\s*filter|brita\s*filter|command\s*strip|duct\s*tape|scotch\s*tape|packing\s*tape|wd-?40|"
+        r"cat\s*litter|clumping\s*litter|dog\s*food|cat\s*food|pet\s*food|dog\s*treat|greenies|bully\s*stick|pee\s*pad|dog\s*bed|"
+        r"motor\s*oil|mobil\s*1|castrol|pennzoil|windshield|wiper\s*blade|michelin|ice\s*melt|pest\s*control|raid|ant\s*trap|mouse\s*trap|propane|charcoal)\b",
+        re.I,
+    ),
+    "clothing": re.compile(
+        r"\b(mens?|womens?|ladies|kids?|boys?|girls?|youth|toddler|infant|unisex|apparel|"
+        r"pants?|jeans|denim|chinos?|khakis?|trousers?|slacks|leggings?|tights|joggers?|sweatpants?|track\s*pants|capris?|shorts?|skirt|skort|dress|"
+        r"hoodie|sweatshirt|pullover|fleece|sweater|cardigan|vest|jacket|coat|parka|puffer|windbreaker|raincoat|trench|blazer|flannel|"
+        r"shirt|t-?shirt|tee|polo|henley|blouse|tunic|tank\s*top|camisole|base\s*layer|thermal|"
+        r"underwear|boxers?|briefs?|trunks|bra|bralette|panties|bikini|socks?|ankle\s*socks|crew\s*socks|merino\s*socks|"
+        r"pyjamas?|pajamas?|pjs?|loungewear|robe|bathrobe|sleepshirt|nightgown|swimsuit|swimwear|swim\s*trunks|rashguard|"
+        r"shoes?|sneakers?|runners?|boots?|rain\s*boots|winter\s*boots|slippers?|sandals?|slides?|loafers?|clogs?|crocs|birkenstock|sorel|hunter|dearfoams|"
+        r"gloves?|mittens?|hat|toque|beanie|cap|scarf|belt|sunglasses|"
+        r"puma|adidas|nike|under\s*armour|reebok|champion|fila|new\s*balance|skechers|asics|columbia|north\s*face|helly\s*hansen|eddie\s*bauer|gerry|spyder|orvis|"
+        r"calvin\s*klein|ck\b|tommy\s*hilfiger|levi'?s|wrangler|lee\b|nautica|lacoste|banana\s*republic|gap|haggar|izod|roots|bench|buffalo|dkny|mondetta|kyodan|tuff\s*athletics|kirkland\s*signature\s*(mens?|womens?|ladies|logo|crewneck|jeans))\b",
+        re.I,
+    ),
+    "health": re.compile(
+        r"\b(vitamin|multivitamin|supplement|softgels?|tablets?|capsules?|caplets?|lozenges?|chewables?|"
+        r"magnesium|omega-?3|fish\s*oil|krill\s*oil|coq10|probiotic|prebiotic|collagen|biotin|melatonin|glucosamine|chondroitin|turmeric|curcumin|ashwagandha|elderberry|echinacea|ginseng|ginkgo|lutein|zinc|iron|calcium|potassium|b12|d3|vitamin\s*[a-z]|centrum|jamieson|webber\s*naturals|nature'?s\s*bounty|organika|youtheory|smartypants|l'il\s*critters|"
+        r"protein\s*powder|whey|isolate|creatine|bcaa|pre-?workout|electrolyte|liquid\s*i\.?v|biosteel|vega|orgain|premier\s*protein|fairlife|ensure|boost|glucerna|"
+        r"pain\s*relief|advil|tylenol|motrin|aleve|aspirin|ibuprofen|acetaminophen|naproxen|voltaren|robax|salonpas|muscle\s*relaxant|"
+        r"allergy|reactine|claritin|zyrtec|aerius|allegra|benadryl|flonase|fluticasone|nasal\s*spray|sinus|cold\s*&\s*flu|dayquil|nyquil|buckley|mucinex|robitussin|halls|strepsils|vicks|emergen-?c|"
+        r"metamucil|psyllium|benefiber|restoralax|laxative|senokot|imodium|pepto|tums|gaviscon|zantac|pepcid|nexium|omeprazole|gravol|digestive|lactaid|lactase|"
+        r"shampoo|conditioner|pantene|head\s*&\s*shoulders|dove|tresemme|herbal\s*essences|nexxus|ogx|moroccanoil|minoxidil|rogaine|"
+        r"body\s*wash|bar\s*soap|ivory\s*body|olay|old\s*spice|irish\s*spring|aveeno|cerave|cetaphil|neutrogena|eucerin|lubriderm|vaseline|aquaphor|gold\s*bond|jergens|nivea|roche-?posay|bioderma|biore|"
+        r"lotion|moisturizer|cleanser|face\s*wash|toner|micellar|serum|retinol|hyaluronic|niacinamide|eye\s*cream|night\s*cream|acne|pimple|hydrocolloid|"
+        r"sunscreen|sunblock|spf\s*\d+|coppertone|banana\s*boat|ombrelle|lip\s*balm|chapstick|eos|burt'?s\s*bees|"
+        r"toothpaste|colgate|crest|sensodyne|pronamel|mouthwash|listerine|therabreath|floss|glide|plackers|interdental|denture|polident|"
+        r"deodorant|antiperspirant|degree|secret|mitchum|native|schmidt|razor|gillette|venus|schick|bic\s*soleil|shave\s*gel|edge\s*shave|"
+        r"eye\s*drops?|systane|refresh|visine|contact\s*solution|opti-?free|biotrue|re-?nu|"
+        r"bandage|band-?aid|polysporin|first\s*aid|gauze|rubbing\s*alcohol|hydrogen\s*peroxide|epsom|heating\s*pad|blood\s*pressure|thermometer|oximeter|cpap|incontinence|depends|poise|always|tampax|kotex|clearblue)\b",
+        re.I,
+    ),
+    "home": re.compile(
+        r"\b(pillow|sheet|bed\s*sheet|flannel\s*sheet|microfiber\s*sheet|thread\s*count|pillowcase|blanket|throw|heated\s*throw|duvet|comforter|quilt|coverlet|mattress|sealy|serta|novaform|tempur|beautyrest|mattress\s*pad|mattress\s*topper|mattress\s*protector|memory\s*foam|"
+        r"towel|bath\s*towel|bath\s*sheet|hand\s*towel|washcloth|bath\s*mat|shower\s*curtain|shower\s*head|moen|kohler|delta|water\s*ridge|faucet|bidet|brondell|toto|"
+        r"rug|area\s*rug|runner|doormat|anti-?fatigue\s*mat|curtain|drape|blackout|blind|shade|"
+        r"hanger|velvet\s*hanger|storage\s*bin|tote|basket|hamper|laundry\s*basket|organizer|closet|shoe\s*rack|drying\s*rack|ironing\s*board|shelving|utility\s*rack|gorilla\s*rack|safe|sentrysafe|"
+        r"lamp|floor\s*lamp|table\s*lamp|desk\s*lamp|string\s*light|led\s*strip|chandelier|night\s*light|flashlight|lantern|headlamp|"
+        r"candle|yankee\s*candle|diffuser|reed\s*diffuser|essential\s*oil|mirror|clock|frame|wall\s*art|"
+        r"desk|standing\s*desk|chair|office\s*chair|dining\s*chair|recliner|ottoman|bar\s*stool|sofa|couch|sectional|loveseat|futon|nightstand|bookcase|bookshelf|cabinet|console|furniture|lifetime\s*table|cosco\s*step|ladder|little\s*giant|"
+        r"patio|gazebo|pergola|sunjoy|yardistry|umbrella|adirondack|fire\s*pit|planter|flower\s*pot|potting\s*soil|fertilizer|grass\s*seed|hose|nozzle|sprinkler|pressure\s*washer|snow\s*shovel|snow\s*blower|generator|firman|lawn\s*mower|trimmer|leaf\s*blower|greenworks|dewalt|milwaukee|makita|craftsman|tool\s*set|socket\s*set|wrench|screwdriver|drill|"
+        r"luggage|suitcase|carry-?on|spinner|samsonite|delsey|swissgear|backpack|duffel|cooler|igloo|coleman|yeti|titan\s*cooler|stanley|thermos|hydro\s*flask|contigo|owala|tumbler|water\s*bottle|tent|sleeping\s*bag|camping\s*chair|air\s*mattress|kayak|paddle\s*board|golf|callaway|taylor\s*made|kirkland\s*signature\s*golf|pickleball|dumbbell|yoga\s*mat|foam\s*roller)\b",
+        re.I,
+    ),
+}
+
+HEALTH_UNIT_RE = re.compile(
+    r"\b\d+\s*(softgels?|tablets?|capsules?|caplets?|lozenges?|gummies|mcg|iu|spf)\b",
+    re.I,
+)
+ELEC_UNIT_RE = re.compile(
+    r"\b(\d{2,3}\s*\"|\d+\s*(tb|gb|mhz|ghz|watts?|lumens?)|1080p|1440p|2160p|wi-?fi\s*[67])\b",
+    re.I,
+)
+
+
+def detect_category(label: str) -> str:
+    if not label:
+        return "other"
+    for rx, cat in CATEGORY_OVERRIDES:
+        if rx.search(label):
+            return cat
+
+    scores = Counter()
+    for cat, pattern in CATEGORY_RULES.items():
+        hits = pattern.findall(label)
+        if hits:
+            scores[cat] += len(hits)
+
+    if HEALTH_UNIT_RE.search(label):
+        scores["health"] += 2
+    if ELEC_UNIT_RE.search(label):
+        scores["electronics"] += 2
+
+    if not scores:
+        return "other"
+    return scores.most_common(1)[0][0]
+
+
+def strip_savings(label: str) -> str:
+    text = label or ""
+    for rx in (SAVE_RE, OFF_RE, REG_RE):
+        text = rx.sub(" ", text)
+    return text
+
+
+def parse_price(text: str):
+    cleaned = PAREN_RE.sub(" ", text or "")
+    found = PRICE_RE.findall(cleaned)
+    return found[-1] if found else None
+
+
+def _money(s: str) -> float:
+    return float(s.replace(",", ""))
+
+
+def _sane_pct(pct):
+    return pct if pct is not None and 1 <= pct <= 90 else None
+
+
+def compute_discount_pct(label: str, sale: float | None):
+    label = label or ""
+    m = PCT_OFF_RE.search(label)
+    if m:
+        return _sane_pct(int(m.group(1)))
+    if not sale:
+        return None
+    m = REG_RE.search(label)
+    if m:
+        reg = _money(m.group(1))
+        if reg > sale:
+            return _sane_pct(round((reg - sale) / reg * 100))
+    m = SAVE_RE.search(label) or OFF_RE.search(label)
+    if m:
+        save = _money(m.group(1))
+        if save > 0:
+            return _sane_pct(round(save / (sale + save) * 100))
+    return None
+
+
+def parse_end_date(label: str) -> str:
+    m = END_RE.search(label or "")
+    if not m:
+        return ""
+    try:
+        datetime.strptime(m.group(1), "%Y-%m-%d")
+    except ValueError:
+        return ""
+    return m.group(1)
+
 
 @dataclass
 class Item:
@@ -270,25 +555,32 @@ class Item:
     alt: str
     alt_key: str
     file_key: str
-    us_key: str
     item_no: str
     category: str
+    price: float | None = field(init=False, default=None)
+    disc_pct: int | None = field(init=False, default=None)
+    clearance: bool = field(init=False, default=False)
+    end_date: str = field(init=False, default="")
+    ident: str = field(init=False, default="")
+    is_flyer: bool = field(init=False, default=False)
 
-CATEGORY_RULES = {
-    "groceries": re.compile(r"\b(coffee|protein|snack|meat|chicken|beef|pork|salmon|shrimp|bacon|sausage|juice|water|milk|cheese|chips|chocolate|cookie|bar|almond|rice|pasta|sauce|soup|oil|dressing|bread|cereal|yogurt|fruit|vegetable|salad|pizza|dumpling|egg|butter|nuts|honey|syrup|tea|wine|beer|spirits|kirkland|granola|tortilla|salsa|frozen|organic|crackers|oats|soda|coke|pepsi|torani|croissant|muffin|pie|cake|deli|ham|turkey|salami|dip|hummus|guacamole|tuna|tofu|broth|ketchup|mayo|mustard|spices|seasoning|strudel|strudels|chia|apple\s+juice|apple\s+sauce|apple\s+pie|steak|ribs|wings|burger|hotdog|noodle|ramen|tortellini|ravioli|ice\s*cream|gelato|sorbet|sparkling|lemonade|energy\s*drink|gatorade|electrolyte|pretzels|popcorn|cashew|pistachio|walnut|pecan|raisin|cranberry)\b", re.I),
-    "appliances": re.compile(r"\b(toaster|blender|espresso|air\s*fryer|microwave|mixer|cookware|pan|pot|kettle|vacuum|shaver|toothbrush|fan|heater|grill|cooker|fridge|freezer|iron|steamer|ice\s*maker|juicer|food\s*processor|hair\s*dryer|curling|pressure\s*cooker|slow\s*cooker|deep\s*fryer|panini\s*press|waffle\s*maker)\b", re.I),
-    "electronics": re.compile(r"\b(tv|television|monitor|speaker|headphone|earbud|soundbar|sound\s*bar|laptop|tablet|phone|iphone|galaxy|ipad|macbook|charger|cable|router|camera|smart\s*watch|projector|receiver|hdmi|usb|hub|airpods?|samsung|sony|bose|jbl|battery|batteries|duracell|energizer|surge|powerbank|power\s*bank|webcam|microsd|sd\s*card|fire\s*stick|roku|chromecast|apple\s*tv|nintendo|playstation|xbox)\b", re.I),
-    "household": re.compile(r"\b(paper\s*towel|toilet\s*paper|tissues?|facial\s*tissues?|detergent|dish\s*soap|trash\s*bags?|garbage\s*bags?|foil|ziploc|sponge|cleaner|disinfectant|light\s*bulb|napkins?|wipes?|laundry|fabric\s*softener|storage\s*box|container|bag|wrap|tide|gain|kirkland\s*signature\s*bath|kirkland\s*signature\s*paper|kirkland\s*signature\s*foil|bleach|lysol|clorox|febreze|trash\s*can|garbage\s*can)\b", re.I),
-    "clothing": re.compile(r"\b(pants?|jeans|hoodie|sweatshirt|socks?|jacket|coat|shirt|shorts?|sweater|underwear|shoes?|boots?|slippers?|gloves?|hat|leggings?|t-shirt|belt|pyjamas?|tee|puma|adidas|nike|ck|calvin|levi|matrix|bamboo|activewear|bra|boxers|briefs|pj|under\s*armour|sketchers|new\s*balance|champion|pullover|cargo|joggers?)\b", re.I),
-    "health": re.compile(r"\b(vitamin|supplement|shampoo|conditioner|lotion|soap|toothpaste|pain\s*relief|advil|tylenol|multivitamin|collagen|mouthwash|deodorant|razor|sunscreen|eye\s*drops?|floss|skin\s*care|cream|bandage|aspirin|aleve|metamucil|magnesium|omega|b12|d3|probiotic|body\s*wash|hair\s*growth|ibuprofen|acetaminophen|allergy|zyrtec|claritin|band-aid|first\s*aid|protein\s*powder|creatine)\b", re.I),
-    "home": re.compile(r"\b(pillow|sheet|blanket|duvet|towel|mat|hanger|storage|bin|basket|lamp|rug|mattress|curtain|candle|diffuser|desk|chair|furniture|pad|comforter|quilt|sheets|bath\s*sheet|bath\s*towel|organizer|throw|mattress\s*pad|mattress\s*topper|bed\s*sheet|duvet\s*cover|memory\s*foam|nightstand|bookshelf|frame)\b", re.I),
-}
+    def __post_init__(self):
+        cleaned = strip_savings(self.label)
+        p = parse_price(cleaned)
+        if p:
+            self.price = float(f"{p[0].replace(',', '')}.{p[1]}")
+            self.clearance = p[1] == "97"
+        self.disc_pct = compute_discount_pct(self.label, self.price)
+        self.end_date = parse_end_date(self.label)
+        self.ident = (
+            f"no:{self.item_no}"
+            if self.item_no
+            else (self.file_key or self.alt_key or self.url)
+        )
+        self.is_flyer = bool(
+            FLYER_RE.search(self.label) or (self.file_key and "costco1" in self.file_key)
+        )
 
-def detect_category(label: str) -> str:
-    for cat, pattern in CATEGORY_RULES.items():
-        if pattern.search(label or ""):
-            return cat
-    return "other"
 
 def in_bad_region(el, container) -> bool:
     for parent in el.parents:
@@ -307,15 +599,21 @@ def in_bad_region(el, container) -> bool:
             return True
     return False
 
+
 def largest_from_srcset(value: str):
     pairs = re.findall(r"(\S+)\s+(\d+)w", value)
     if pairs:
         return max(pairs, key=lambda p: int(p[1]))[0]
     return value.split(",")[0].strip().split(" ")[0] or None
 
+
 def usable(url) -> bool:
-    return bool(url) and not url.startswith("data:") and not re.search(
-        r"(placeholder|blank\.gif|1x1|lazy[-_]?load|spinner)", url, re.I)
+    return (
+        bool(url)
+        and not url.startswith("data:")
+        and not re.search(r"(placeholder|blank\.gif|1x1|lazy[-_]?load|spinner)", url, re.I)
+    )
+
 
 def candidate_urls(img):
     out = []
@@ -328,36 +626,32 @@ def candidate_urls(img):
     for attr in KNOWN_LAZY_ATTRS:
         out.append(img.get(attr))
     for attr, val in img.attrs.items():
-        if attr.startswith("data-") and isinstance(val, str) and IMG_URL_RE.match(val.strip()):
+        if (
+            attr.startswith("data-")
+            and isinstance(val, str)
+            and IMG_URL_RE.match(val.strip())
+        ):
             out.append(val.strip())
     out.append(img.get("src"))
     return [u.strip() for u in out if isinstance(u, str) and usable(u.strip())]
 
-def norm_text(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
 
-def filename_key(url: str):
+def norm_text(s: str) -> str:
+    return NON_ALNUM_RE.sub(" ", (s or "").lower()).strip()
+
+
+def filename_key(url: str) -> str:
     name = Path(unquote(urlparse(url).path)).stem.lower()
-    prev = None
-    while prev != name:
-        prev = name
-        name = re.sub(r"-\d{2,4}x\d{2,4}$", "", name)
-        name = re.sub(r"-(scaled|rotated|edited|copy|min|large|medium|thumbnail)$", "", name)
-        name = re.sub(r"[-_]\d{1,2}$", "", name)
-    key = re.sub(r"[^a-z0-9]", "", name)
+    name = FILE_SUFFIX_RE.sub("", name)
+    key = NON_ALNUM_RE.sub("", name)
     return key if len(key) >= 5 and not GENERIC_NAME_RE.match(key) else ""
+
 
 def pretty_name(url: str) -> str:
     name = Path(unquote(urlparse(url).path)).stem
     name = re.sub(r"-\d{2,4}x\d{2,4}$", "", name)
     return re.sub(r"[-_]+", " ", name).strip().title()
 
-def userscript_key(img) -> str:
-    alt = img.get("alt") or ""
-    if alt:
-        return alt
-    src = img.get("src") or ""
-    return src.split("?")[0].rsplit("/", 1)[-1]
 
 def find_item_no(alt: str, url: str) -> str:
     m = ALT_ITEM_NO_RE.match(alt or "")
@@ -366,22 +660,19 @@ def find_item_no(alt: str, url: str) -> str:
     m = FILE_ITEM_NO_RE.match(Path(unquote(urlparse(url).path)).name)
     return m.group(1) if m else ""
 
+
 def reject_reason(img, url: str, container):
     u = urlparse(url)
     fig = img.find_parent("figure")
     cap = fig.find("figcaption") if fig else None
     cap_text = cap.get_text(" ", strip=True) if cap else ""
 
-    blob = " ".join([
-        img.get("alt") or "",
-        img.get("title") or "",
-        cap_text,
-        Path(u.path).name
-    ]).lower()
+    blob = " ".join(
+        [img.get("alt") or "", img.get("title") or "", cap_text, Path(u.path).name]
+    ).lower()
 
     if "what is on sale next week" in blob or "sales from last year" in blob:
         return "promo_banner"
-
     if any(h in u.netloc.lower() for h in BAD_HOSTS):
         return "bad_host"
     if u.path.lower().endswith((".svg", ".ico")):
@@ -398,7 +689,8 @@ def reject_reason(img, url: str, container):
         return "bad_region"
     return None
 
-def extract_from(container, page_url: str, stats: Counter):
+
+def extract_from(container, page_url: str):
     imgs = list(container.find_all("img"))
     for ns in container.find_all("noscript"):
         if ns.string:
@@ -422,30 +714,38 @@ def extract_from(container, page_url: str, stats: Counter):
         file_key = filename_key(url)
         item_no = find_item_no(alt, url)
         category = detect_category(label)
-        dedupe_key = f"no:{item_no}" if item_no else (file_key or alt_key or url)
-        if dedupe_key in seen:
+        it = Item(
+            url=url,
+            label=label,
+            alt=alt,
+            alt_key=alt_key,
+            file_key=file_key,
+            item_no=item_no,
+            category=category,
+        )
+        if it.ident in seen:
             continue
-        seen.add(dedupe_key)
-        items.append(Item(url=url, label=label, alt=alt, alt_key=alt_key, 
-                          file_key=file_key, us_key=userscript_key(img), 
-                          item_no=item_no, category=category))
-    return items, imgs
+        seen.add(it.ident)
+        items.append(it)
+    return items
 
-def extract_items(post_html: str, page_url: str):
-    soup = BeautifulSoup(post_html, "html.parser")
+
+def extract_items_from_soup(soup: BeautifulSoup, page_url: str):
     for sel in CONTAINER_SELECTORS:
         el = soup.select_one(sel)
         if el is not None and el.find("img"):
-            items, _ = extract_from(el, page_url, Counter())
+            items = extract_from(el, page_url)
             if items:
                 return items
-    items, _ = extract_from(soup, page_url, Counter())
-    return items
+    return extract_from(soup, page_url)
 
-def extract_location(post_html: str) -> str:
-    soup = BeautifulSoup(post_html, "html.parser")
-    text = soup.get_text(" ", strip=True)
-    m = re.search(r"Location:\s*([A-Za-z0-9\s\(\),_-]+?)(?=\.\s|Hi\s|Hello\s|$)", text, re.I)
+
+def extract_location_from_soup(soup: BeautifulSoup, post_html: str) -> str:
+    content = soup.select_one(".entry-content") or soup
+    text = content.get_text(" ", strip=True)
+    m = re.search(
+        r"Location:\s*([A-Za-z0-9\s\(\),_-]+?)(?=\.\s|Hi\s|Hello\s|$)", text, re.I
+    )
     if m:
         return m.group(1).strip()
     m2 = re.search(r"Location:\s*([^<\n\r]+)", post_html, re.I)
@@ -453,104 +753,37 @@ def extract_location(post_html: str) -> str:
         return m2.group(1).strip().split("<")[0]
     return ""
 
+
 def find_exclusive(weekend_items, monday_items):
     mon_nos = {i.item_no for i in monday_items if i.item_no}
     mon_files = {i.file_key for i in monday_items if i.file_key}
     mon_alts = [i.alt_key for i in monday_items if i.alt_key]
     mon_alt_set = set(mon_alts)
+    sm = SequenceMatcher(None, "", "")
 
     def duplicate(it: Item) -> bool:
         if it.item_no:
-            return it.item_no in mon_nos or (bool(it.file_key) and it.file_key in mon_files)
+            return it.item_no in mon_nos or (
+                bool(it.file_key) and it.file_key in mon_files
+            )
         if it.file_key and it.file_key in mon_files:
             return True
         if it.alt_key:
             if it.alt_key in mon_alt_set:
                 return True
-            if len(it.alt_key) >= 12 and any(
-                    SequenceMatcher(None, it.alt_key, m).ratio() >= FUZZY_THRESHOLD
-                    for m in mon_alts):
-                return True
+            if len(it.alt_key) >= 12:
+                sm.set_seq1(it.alt_key)
+                for m in mon_alts:
+                    sm.set_seq2(m)
+                    if (
+                        sm.quick_ratio() >= FUZZY_THRESHOLD
+                        and sm.ratio() >= FUZZY_THRESHOLD
+                    ):
+                        return True
         return False
 
     return [i for i in weekend_items if not duplicate(i)]
 
-def find_exclusive_userscript(weekend_items, monday_items):
-    mon = {i.us_key for i in monday_items if i.us_key}
-    return [i for i in weekend_items if i.us_key and i.us_key not in mon]
-
-PRICE_RE = re.compile(r"\$\s?(\d[\d,]*)\.(\d{2})\b")
-END_RE = re.compile(
-    r"(?:EXPIRES|ENDS|VALID\s+(?:UNTIL|THROUGH|THRU))\s+(?:ON\s+)?(\d{4}-\d{2}-\d{2})", re.I)
-
-MONEY = r"\$\s?(\d[\d,]*(?:\.\d{1,2})?)"
-SAVE_RE = re.compile(r"\b(?:you\s+)?(?:instant\s+)?(?:save|savings?)\s*(?:of\s*)?:?\s*" + MONEY, re.I)
-OFF_RE = re.compile(MONEY + r"\s*(?:off|instant\s+savings?|savings?|discount)\b", re.I)
-REG_RE = re.compile(r"\b(?:reg(?:ular)?|was|orig(?:inal)?)\.?\s*(?:price)?\s*:?\s*" + MONEY, re.I)
-PCT_OFF_RE = re.compile(r"\b(\d{1,2})\s*%\s*off\b", re.I)
-
-def parse_price(label: str):
-    text = re.sub(r"\([^)]*\)", " ", label or "")
-    found = PRICE_RE.findall(text)
-    return found[-1] if found else None
-
-def strip_savings(label: str) -> str:
-    text = label or ""
-    for rx in (SAVE_RE, OFF_RE, REG_RE):
-        text = rx.sub(" ", text)
-    return text
-
-def price_value(label: str):
-    p = parse_price(strip_savings(label))
-    if not p:
-        return None
-    return float(f"{p[0].replace(',', '')}.{p[1]}")
-
-def is_clearance(label: str) -> bool:
-    p = parse_price(strip_savings(label))
-    return bool(p) and p[1] == "97"
-
-def _money(s: str) -> float:
-    return float(s.replace(",", ""))
-
-def _sane_pct(pct):
-    return pct if pct is not None and 1 <= pct <= 90 else None
-
-def discount_pct(label: str):
-    label = label or ""
-    m = PCT_OFF_RE.search(label)
-    if m:
-        return _sane_pct(int(m.group(1)))
-
-    sale = price_value(label)
-    if not sale:
-        return None
-
-    m = REG_RE.search(label)
-    if m:
-        reg = _money(m.group(1))
-        if reg > sale:
-            return _sane_pct(round((reg - sale) / reg * 100))
-
-    m = SAVE_RE.search(label) or OFF_RE.search(label)
-    if m:
-        save = _money(m.group(1))
-        if save > 0:
-            return _sane_pct(round(save / (sale + save) * 100))
-    return None
-
-def parse_end_date(label: str) -> str:
-    m = END_RE.search(label or "")
-    if not m:
-        return ""
-    try:
-        datetime.strptime(m.group(1), "%Y-%m-%d")
-    except ValueError:
-        return ""
-    return m.group(1)
-
-def item_ident(it: Item) -> str:
-    return f"no:{it.item_no}" if it.item_no else (it.file_key or it.alt_key or it.url)
 
 def _previous_entry(prev_state, mode, target_url):
     entry = (prev_state.get("history") or {}).get(mode) or {}
@@ -559,8 +792,10 @@ def _previous_entry(prev_state, mode, target_url):
         return entry.get("previous") or {}
     return cur
 
+
 def previous_ids(prev_state, mode, target_url):
     return set(_previous_entry(prev_state, mode, target_url).get("ids") or [])
+
 
 def build_history(prev_state, mode, target_url, ids):
     history = dict(prev_state.get("history") or {})
@@ -570,23 +805,54 @@ def build_history(prev_state, mode, target_url, ids):
     }
     return history
 
+
 def update_price_db(prev_state, target_items, valid_range):
     db = dict(prev_state.get("price_db") or {})
     today_str = datetime.now(ZoneInfo("America/Vancouver")).strftime("%Y-%m-%d")
     date_label = valid_range[0].isoformat() if valid_range else today_str
 
     for i in target_items:
-        ident = item_ident(i)
-        price = price_value(i.label)
-        pct = discount_pct(i.label)
-        entry = db.get(ident, {"name": i.label, "item_no": i.item_no, "history": []})
+        ident = i.ident
+        entry = db.get(
+            ident,
+            {
+                "name": i.label,
+                "item_no": i.item_no,
+                "url": i.url,
+                "cat": i.category,
+                "history": [],
+            },
+        )
+        entry["name"] = i.label
+        entry["url"] = i.url
+        entry["cat"] = i.category
+        if i.item_no:
+            entry["item_no"] = i.item_no
 
-        if price is not None:
-            hist = entry["history"]
-            if not hist or hist[-1]["date"] != date_label:
-                hist.append({"date": date_label, "price": price, "pct": pct})
+        if i.price is not None:
+            hist = entry.setdefault("history", [])
+            if not hist:
+                hist.append({"date": date_label, "price": i.price, "pct": i.disc_pct})
+            elif hist[-1]["date"] == date_label:
+                hist[-1]["price"] = i.price
+                hist[-1]["pct"] = i.disc_pct
+            elif hist[-1].get("price") != i.price or hist[-1].get("pct") != i.disc_pct:
+                hist.append({"date": date_label, "price": i.price, "pct": i.disc_pct})
         db[ident] = entry
     return db
+
+
+def is_all_time_low(it: Item, price_db: dict) -> bool:
+    if it.price is None:
+        return False
+    entry = price_db.get(it.ident)
+    if not entry:
+        return False
+    prices = [
+        h["price"] for h in entry.get("history", []) if h.get("price") is not None
+    ]
+    return len(prices) >= 2 and max(prices) > it.price and it.price <= min(prices)
+
 
 def load_previous_state(scraper):
     if not STATE_URL:
@@ -601,6 +867,7 @@ def load_previous_state(scraper):
     except Exception as exc:
         print(f"[state] could not load previous state: {exc!r}", file=sys.stderr)
     return {}, False
+
 
 def send_email(subject: str, body: str) -> bool:
     user = os.getenv("MAIL_USERNAME")
@@ -620,7 +887,9 @@ def send_email(subject: str, body: str) -> bool:
     msg["To"] = ", ".join(recipients)
     msg.set_content(body)
     try:
-        with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context(), timeout=30) as smtp:
+        with smtplib.SMTP_SSL(
+            host, port, context=ssl.create_default_context(), timeout=30
+        ) as smtp:
             smtp.login(user, password)
             smtp.send_message(msg, to_addrs=recipients)
         print(f"[email] sent to {', '.join(recipients)}")
@@ -629,39 +898,46 @@ def send_email(subject: str, body: str) -> bool:
         print(f"[email] failed: {exc!r}", file=sys.stderr)
     return False
 
+
 def digest_line(it: Item) -> str:
-    pct = discount_pct(it.label)
-    price = price_value(it.label)
     bits = []
-    if pct:
-        bits.append(f"{pct}% off")
-    if price is not None:
-        bits.append(f"${price:.2f}")
+    if it.disc_pct:
+        bits.append(f"{it.disc_pct}% off")
+    if it.price is not None:
+        bits.append(f"${it.price:.2f}")
     name = re.sub(r"\s+", " ", it.label).strip()[:90]
     return f"- {name}" + (f" ({', '.join(bits)})" if bits else "")
 
+
 def build_digest(items, exclusive, is_weekend_mode):
     sections = []
-
-    with_disc = sorted((i for i in items if discount_pct(i.label)),
-                       key=lambda i: discount_pct(i.label), reverse=True)
+    with_disc = sorted(
+        (i for i in items if i.disc_pct), key=lambda i: i.disc_pct, reverse=True
+    )
     if with_disc:
-        sections.append("BIGGEST DISCOUNTS\n" + "\n".join(digest_line(i) for i in with_disc[:10]))
+        sections.append(
+            "BIGGEST DISCOUNTS\n" + "\n".join(digest_line(i) for i in with_disc[:10])
+        )
 
     if is_weekend_mode and exclusive:
-        top_new = sorted(exclusive, key=lambda i: discount_pct(i.label) or 0, reverse=True)[:5]
-        sections.append("NEW THIS WEEKEND\n" + "\n".join(digest_line(i) for i in top_new))
+        top_new = sorted(exclusive, key=lambda i: i.disc_pct or 0, reverse=True)[:5]
+        sections.append(
+            "NEW THIS WEEKEND\n" + "\n".join(digest_line(i) for i in top_new)
+        )
 
-    clearance = [i for i in items if is_clearance(i.label)]
+    clearance = [i for i in items if i.clearance]
     if clearance:
         shown = clearance[:5]
         extra = len(clearance) - len(shown)
-        text = "CLEARANCE FINDS (.97 prices)\n" + "\n".join(digest_line(i) for i in shown)
+        text = "CLEARANCE FINDS (.97 prices)\n" + "\n".join(
+            digest_line(i) for i in shown
+        )
         if extra > 0:
             text += f"\n...and {extra} more on the site"
         sections.append(text)
 
     return "\n\n".join(sections)
+
 
 def maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, items, exclusive):
     force = os.getenv("FORCE_NOTIFY") == "1"
@@ -683,13 +959,14 @@ def maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, items, exclu
     if digest:
         lines += ["", digest]
 
-    best = max((discount_pct(i.label) or 0 for i in items), default=0)
+    best = max((i.disc_pct or 0 for i in items), default=0)
     best_txt = f" | top deal {best}% off" if best else ""
     if is_weekend_mode:
         subj = f"CocoWest: {exclusive_count} new weekend deals{best_txt}"
     else:
         subj = f"CocoWest: Monday Sales Post ({items_count} items){best_txt}"
     send_email(subj, "\n".join(lines))
+
 
 PAGE_TEMPLATE = """<!doctype html>
 <html lang="en">
@@ -701,12 +978,12 @@ PAGE_TEMPLATE = """<!doctype html>
 <style>
   :root {
     --bg:#f4f5f7; --fg:#1a1a1a; --card:#ffffff; --muted:#666; --line:#e2e2e2;
-    --accent:#1b8a3a; --on-accent:#ffffff; --bar:rgba(255,255,255,.94);
-    --highlight:#e6f4ea; --highlight-border:#34a853; --danger:#dc3545;
+    --accent:#1b8a3a; --on-accent:#ffffff; --bar:rgba(255,255,255,.95);
+    --highlight:#e6f4ea; --highlight-border:#34a853; --danger:#dc3545; --warn:#fd7e14;
   }
   @media (prefers-color-scheme: dark) {
     :root { --bg:#121212; --fg:#eeeeee; --card:#1e1e1e; --muted:#9a9a9a; --line:#333;
-            --accent:#3ddc6a; --on-accent:#08210f; --bar:rgba(18,18,18,.94);
+            --accent:#3ddc6a; --on-accent:#08210f; --bar:rgba(18,18,18,.95);
             --highlight:#132618; --highlight-border:#28a745; }
   }
   * { box-sizing:border-box; }
@@ -714,80 +991,111 @@ PAGE_TEMPLATE = """<!doctype html>
   html { -webkit-text-size-adjust:100%; }
   body { margin:0; background:var(--bg); color:var(--fg); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
          padding-bottom:4.5rem; padding-left:env(safe-area-inset-left,0px); padding-right:env(safe-area-inset-right,0px); }
-  
+
   .sticky-header {
-    position: sticky;
-    top: 0;
-    z-index: 10;
-    background: var(--bar);
-    -webkit-backdrop-filter: blur(8px);
-    backdrop-filter: blur(8px);
-    border-bottom: 1px solid var(--line);
-    padding-top: env(safe-area-inset-top, 0px);
+    position:sticky; top:0; z-index:10; background:var(--bar);
+    -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line); padding-top:env(safe-area-inset-top, 0px);
   }
-  .bar { padding: .6rem .8rem .4rem; }
-  .bar-row { max-width:1200px; margin:0 auto; display:flex; align-items:center; justify-content:space-between; gap:.6rem; }
-  .title { font-size:1.05rem; font-weight:700; }
-  .badge-btn { background:var(--accent); color:var(--on-accent); border:none; border-radius:999px; padding:.35rem .85rem;
-               font-size:.9rem; font-weight:700; cursor:pointer; white-space:nowrap; }
+  .bar { padding:.55rem .8rem .35rem; }
+  .bar-row { max-width:1200px; margin:0 auto; display:flex; align-items:center; justify-content:space-between; gap:.45rem; }
+  .title { font-size:1.02rem; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .header-btns { display:flex; align-items:center; gap:.35rem; }
+  .badge-btn { background:var(--accent); color:var(--on-accent); border:none; border-radius:999px; padding:.32rem .75rem;
+               font-size:.82rem; font-weight:700; cursor:pointer; white-space:nowrap; }
   .badge-btn.gray { background:#6c757d; color:#fff; }
+  .badge-btn.next-mode { background:#0d6efd; color:#fff; }
   .badge-btn.active { background:var(--danger); color:#fff; }
-  .search { max-width:1200px; margin:.5rem auto 0; display:flex; gap:.5rem; }
-  .search input { flex:1; min-width:0; padding:.6rem .8rem; font-size:16px; border:1px solid var(--line); border-radius:10px;
+
+  .search { max-width:1200px; margin:.45rem auto 0; display:flex; gap:.45rem; }
+  .search input { flex:1; min-width:0; padding:.55rem .75rem; font-size:16px; border:1px solid var(--line); border-radius:10px;
                   background:var(--card); color:var(--fg); }
-  .toolbar { max-width:1200px; margin:0 auto; padding:0 .8rem .6rem; display:flex; flex-wrap:wrap; align-items:center; gap:.35rem; }
-  .chip { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:999px; padding:.25rem .65rem;
-          font-size:.8rem; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; white-space:nowrap; }
-  .chip.icon-only { padding:.25rem .5rem; font-size:.95rem; }
+
+  .quick-add { max-width:1200px; margin:.35rem auto 0; padding:.35rem .6rem; background:var(--highlight);
+               border:1px solid var(--highlight-border); border-radius:10px; display:flex; flex-wrap:wrap;
+               align-items:center; justify-content:space-between; gap:.4rem; font-size:.8rem; }
+  .quick-add-actions { display:flex; gap:.35rem; flex-wrap:wrap; }
+
+  .toolbar { max-width:1200px; margin:0 auto; padding:.35rem .8rem .5rem; display:flex; flex-wrap:wrap; align-items:center; gap:.32rem; }
+  .chip { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:999px; padding:.24rem .6rem;
+          font-size:.78rem; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; gap:.22rem; white-space:nowrap; }
   .chip.active { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
+  .chip.warn-active { background:var(--warn); color:#fff; border-color:var(--warn); }
+  .chip.next-active { background:#0d6efd; color:#fff; border-color:#0d6efd; }
   .chip.danger { color:var(--danger); border-color:var(--danger); }
   .sort-select { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:999px;
-                 padding:.25rem .5rem; font-size:.8rem; font-weight:600; max-width:100%; }
-  .cols-toggle { display:none; align-items:center; gap:.35rem; margin-left:auto; font-size:.8rem; color:var(--muted); }
+                 padding:.24rem .5rem; font-size:.78rem; font-weight:600; }
+  .cols-toggle { display:none; align-items:center; gap:.3rem; margin-left:auto; font-size:.78rem; color:var(--muted); }
   .seg { display:inline-flex; border:1px solid var(--line); border-radius:999px; overflow:hidden; }
-  .seg button { border:none; background:var(--card); color:var(--fg); padding:.3rem .7rem; font-size:.85rem; font-weight:700; cursor:pointer; }
+  .seg button { border:none; background:var(--card); color:var(--fg); padding:.25rem .65rem; font-size:.8rem; font-weight:700; cursor:pointer; }
   .seg button.active { background:var(--accent); color:var(--on-accent); }
 
-  .list-bar { max-width:1200px; margin:0 auto; padding:0 .8rem .6rem; display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; }
-  .list-sum { font-size:.85rem; font-weight:700; margin-right:auto; }
-  
-  .meta { max-width:1200px; margin:.6rem auto .4rem; padding:0 .8rem; color:var(--muted); font-size:.8rem; line-height:1.5; }
+  .list-bar { max-width:1200px; margin:0 auto; padding:0 .8rem .55rem; display:flex; flex-wrap:wrap; align-items:center; gap:.35rem; }
+  .list-sum { font-size:.82rem; font-weight:700; margin-right:auto; }
+
+  .meta { max-width:1200px; margin:.5rem auto .35rem; padding:0 .8rem; color:var(--muted); font-size:.78rem; line-height:1.45; }
   .meta a { color:inherit; }
-  
-  .grid { max-width:1200px; margin:.6rem auto; padding:0 .8rem; display:grid; gap:.8rem; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); }
+
+  .grid { max-width:1200px; margin:.5rem auto; padding:0 .8rem; display:grid; gap:.75rem; grid-template-columns:repeat(auto-fill,minmax(215px,1fr)); }
   .grid.c1 { grid-template-columns:minmax(0,1fr); }
   .grid.c2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+
+  /* Compact No-Image Checklist Mode */
+  .grid.no-img { grid-template-columns:minmax(0,1fr) !important; gap:.35rem; }
+  .grid.no-img .card { flex-direction:row; align-items:center; padding:.4rem .65rem; border-radius:8px; min-height:auto; }
+  .grid.no-img .card > a, .grid.no-img .new-tag, .grid.no-img .tags-right { display:none !important; }
+  .grid.no-img .card figcaption { padding:0 .6rem 0 0; font-size:.85rem; }
+  .grid.no-img .card-footer { border-top:none; padding:0; flex-shrink:0; gap:.45rem; }
 
   .card { margin:0; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; position:relative;
           display:flex; flex-direction:column; justify-content:space-between; }
   .card.is-new { border:2px solid var(--highlight-border); background:var(--highlight); }
   .card.is-expired img, .card.is-expired figcaption { opacity:.5; }
-  .new-tag { position:absolute; top:8px; left:8px; background:#28a745; color:#fff; font-size:.7rem; font-weight:bold; padding:2px 6px;
+  .card.is-got figcaption { text-decoration:line-through; opacity:.55; }
+  .card.is-got img { opacity:.45; filter:grayscale(80%); }
+
+  .new-tag { position:absolute; top:8px; left:8px; background:#28a745; color:#fff; font-size:.68rem; font-weight:bold; padding:2px 6px;
              border-radius:4px; z-index:2; text-transform:uppercase; }
+  .new-tag.carry { background:#0d6efd; }
+  .new-tag.custom { background:#6f42c1; }
+
   .tags-right { position:absolute; top:8px; right:8px; z-index:2; display:flex; flex-direction:column; align-items:flex-end;
                 gap:4px; pointer-events:none; }
-  .disc-tag { background:#d93025; color:#fff; font-size:.8rem; font-weight:800; padding:2px 7px; border-radius:4px;
+  .disc-tag { background:#d93025; color:#fff; font-size:.78rem; font-weight:800; padding:2px 7px; border-radius:4px;
               box-shadow:0 1px 3px rgba(0,0,0,.35); }
-  .clr-tag { background:#6f42c1; color:#fff; font-size:.7rem; font-weight:bold; padding:2px 6px; border-radius:4px;
+  .atl-tag { background:#ff6d00; color:#fff; font-size:.68rem; font-weight:800; padding:2px 6px; border-radius:4px;
+             text-transform:uppercase; box-shadow:0 1px 3px rgba(0,0,0,.35); }
+  .clr-tag { background:#6f42c1; color:#fff; font-size:.68rem; font-weight:bold; padding:2px 6px; border-radius:4px;
              text-transform:uppercase; }
+
   .card a { display:block; }
   .card img { width:100%; aspect-ratio:1/1; object-fit:contain; display:block; background:#fff; }
-  .card figcaption { padding:.5rem .6rem; font-size:.85rem; line-height:1.3; flex-grow:1; overflow-wrap:anywhere; cursor:pointer; }
-  .card-footer { padding:.4rem .6rem .6rem; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.3rem;
-                 border-top:1px solid var(--line); font-size:.8rem; }
-  .shop-label { display:flex; align-items:center; gap:.4rem; cursor:pointer; font-weight:500; }
-  .shop-label input { width:1.1rem; height:1.1rem; accent-color:var(--accent); cursor:pointer; }
-  .foot-right { display:flex; align-items:center; gap:.3rem; flex-wrap:wrap; justify-content:flex-end; margin-left:auto; }
-  .sku-badge { font-size:.68rem; font-weight:700; padding:2px 6px; border-radius:4px; background:var(--line); color:var(--fg); cursor:pointer; }
-  .repeat-tag { font-size:.68rem; font-weight:600; padding:2px 7px; border-radius:999px; border:1px solid var(--line);
-                color:var(--muted); white-space:nowrap; }
-  .end-badge { font-size:.72rem; font-weight:700; padding:2px 8px; border-radius:999px; white-space:nowrap; }
+  .card figcaption { padding:.5rem .6rem; font-size:.84rem; line-height:1.3; flex-grow:1; overflow-wrap:anywhere; cursor:pointer; }
+  .card-footer { padding:.4rem .6rem .55rem; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.3rem;
+                 border-top:1px solid var(--line); font-size:.78rem; }
+  .card-actions { display:flex; align-items:center; gap:.3rem; flex-wrap:wrap; }
+  .shop-label { display:inline-flex; align-items:center; gap:.3rem; cursor:pointer; font-weight:600; }
+  .shop-label input { width:1.05rem; height:1.05rem; accent-color:var(--accent); cursor:pointer; margin:0; }
+  .mini-btn { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:6px; padding:1px 6px;
+              font-size:.7rem; font-weight:700; cursor:pointer; line-height:1.35; }
+  .mini-btn.active { background:#0d6efd; color:#fff; border-color:#0d6efd; }
+  .mini-btn.got-active { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
+
+  .foot-right { display:flex; align-items:center; gap:.28rem; flex-wrap:wrap; justify-content:flex-end; margin-left:auto; }
+  .sku-badge { font-size:.66rem; font-weight:700; padding:2px 5px; border-radius:4px; background:var(--line); color:var(--fg); cursor:pointer; }
+  .repeat-tag { font-size:.66rem; font-weight:600; padding:2px 6px; border-radius:999px; border:1px solid var(--line); color:var(--muted); }
+  .end-badge { font-size:.7rem; font-weight:700; padding:2px 7px; border-radius:999px; white-space:nowrap; }
   .end-badge.today { background:#dc3545; color:#fff; }
   .end-badge.tomorrow { background:#fd7e14; color:#fff; }
   .end-badge.week { background:#ffc107; color:#1a1a1a; }
   .end-badge.later { background:transparent; color:var(--muted); border:1px solid var(--line); font-weight:600; }
   .end-badge.expired { background:var(--line); color:var(--muted); text-decoration:line-through; }
-  .empty { padding:2rem 1rem; text-align:center; color:var(--muted); grid-column:1/-1; }
+
+  .empty { padding:1.5rem 1rem; text-align:center; color:var(--muted); grid-column:1/-1; }
+  .db-results { grid-column:1/-1; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:.9rem; margin-top:.3rem; }
+  .db-results h4 { margin:0 0 .6rem; font-size:.9rem; }
+  .db-row { display:flex; align-items:center; justify-content:space-between; gap:.6rem; padding:.45rem 0; border-top:1px solid var(--line); font-size:.82rem; }
+  .db-row img { width:44px; height:44px; object-fit:contain; border-radius:6px; background:#fff; border:1px solid var(--line); flex-shrink:0; }
 
   .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.6); backdrop-filter:blur(4px); z-index:100; display:flex; align-items:center; justify-content:center; padding:1rem; }
   .modal { background:var(--card); color:var(--fg); border-radius:14px; max-width:450px; width:100%; max-height:85vh; overflow-y:auto; padding:1.2rem; box-shadow:0 8px 24px rgba(0,0,0,.3); position:relative; }
@@ -796,25 +1104,21 @@ PAGE_TEMPLATE = """<!doctype html>
   .hist-item { display:flex; justify-content:space-between; padding:.5rem 0; border-bottom:1px solid var(--line); font-size:.85rem; }
 
   .top-btn { position:fixed; right:calc(.8rem + env(safe-area-inset-right,0px)); bottom:calc(.8rem + env(safe-area-inset-bottom,0px));
-             width:2.9rem; height:2.9rem; border-radius:50%; border:none; background:var(--accent); color:var(--on-accent);
-             font-size:1.5rem; font-weight:700; line-height:1; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,.35);
+             width:2.8rem; height:2.8rem; border-radius:50%; border:none; background:var(--accent); color:var(--on-accent);
+             font-size:1.4rem; font-weight:700; line-height:1; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,.35);
              z-index:20; opacity:0; pointer-events:none; transition:opacity .2s; }
   .top-btn.show { opacity:1; pointer-events:auto; }
 
   @media (max-width:640px) {
     .cols-toggle { display:flex; }
-    .toolbar { padding:0 .6rem .5rem; gap:.25rem; }
-    .list-bar { padding:0 .6rem .5rem; gap:.3rem; }
-    .chip { font-size:.72rem; padding:.22rem .5rem; }
-    .chip.icon-only { font-size:.85rem; padding:.22rem .4rem; }
-    .sort-select { font-size:.72rem; padding:.22rem .4rem; }
+    .toolbar { padding:.25rem .6rem .45rem; gap:.24rem; }
+    .list-bar { padding:0 .6rem .45rem; gap:.28rem; }
+    .chip { font-size:.71rem; padding:.2rem .48rem; }
+    .sort-select { font-size:.71rem; padding:.2rem .4rem; }
     .grid { padding:0 .5rem; gap:.5rem; }
-    .grid.c1 { grid-template-columns:minmax(0,1fr); }
-    .grid.c2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
-    .grid.c2 .card { border-radius:10px; }
-    .grid.c2 .card figcaption { font-size:.72rem; padding:.4rem .45rem; }
-    .grid.c2 .card-footer { padding:.35rem .45rem .5rem; font-size:.72rem; }
-    .title { font-size:.95rem; }
+    .grid.c2 .card figcaption { font-size:.73rem; padding:.38rem .45rem; }
+    .grid.c2 .card-footer { padding:.32rem .45rem .45rem; font-size:.71rem; }
+    .title { font-size:.92rem; }
     .meta { padding:0 .6rem; }
   }
 </style>
@@ -824,28 +1128,33 @@ PAGE_TEMPLATE = """<!doctype html>
   <header class="bar">
     <div class="bar-row">
       <div class="title">&#128717;&#65039; __PAGE_TITLE__</div>
-      <button class="badge-btn" id="list-toggle" type="button">&#128722; List (0)</button>
+      <div class="header-btns">
+        <button class="badge-btn next-mode" id="next-toggle" type="button" title="View items saved for next week">&#128204; Next Wk (0)</button>
+        <button class="badge-btn" id="list-toggle" type="button">&#128722; Cart (0)</button>
+      </div>
     </div>
     <div class="search">
-      <input id="q" type="search" placeholder="Filter by name or item number..." autocomplete="off">
+      <input id="q" type="search" placeholder="Search items, SKU, or type custom item (e.g. Milk $5.99)..." autocomplete="off">
       <button class="badge-btn gray" id="reset-btn" type="button">Reset</button>
+    </div>
+    <div class="quick-add" id="quick-add" hidden>
+      <span id="quick-add-label"></span>
+      <div class="quick-add-actions">
+        <button class="chip active" id="add-custom-cart" type="button">+ Add to Cart</button>
+        <button class="chip next-active" id="add-custom-next" type="button">&#128204; Save for Next Wk</button>
+        <button class="chip" id="search-hist-btn" type="button">&#128269; Search Past Catalog</button>
+      </div>
     </div>
   </header>
   <div class="toolbar">
     __NEW_BTN__
-    <button class="chip" id="sale-toggle" type="button" aria-pressed="false">&#128293; On Sale (__SALE_COUNT__)</button>
-    <button class="chip" id="clr-toggle" type="button" aria-pressed="false">&#127991;&#65039; Clearance (__CLR_COUNT__)</button>
-    <button class="chip" id="week-toggle" type="button" aria-pressed="false">&#9200; Ends this week (0)</button>
-    <button class="chip" id="wkhide-toggle" type="button" aria-pressed="false" hidden>&#128683; Hide ending this week (0)</button>
-    <button class="chip" id="exp-toggle" type="button" aria-pressed="false" hidden>&#128584; Hide expired (0)</button>
+    <button class="chip" id="sale-toggle" type="button" aria-pressed="false">&#128293; Sale (__SALE_COUNT__)</button>
+    __ATL_BTN__
+    <button class="chip" id="clr-toggle" type="button" aria-pressed="false">&#127991;&#65039; .97 (__CLR_COUNT__)</button>
+    <button class="chip" id="week-cycle" type="button" title="Cycle: All -> Ends this week -> Hide ending this week">&#9200; Ends This Wk (0)</button>
+    <button class="chip" id="exp-toggle" type="button" aria-pressed="false" hidden>&#128584; Hide Expired (0)</button>
     __REPEAT_BTN__
-    <button class="chip icon-only" data-cat="appliances" type="button" aria-pressed="false" title="Appliances">&#129368;</button>
-    <button class="chip icon-only" data-cat="electronics" type="button" aria-pressed="false" title="Electronics">&#128187;</button>
-    <button class="chip icon-only" data-cat="groceries" type="button" aria-pressed="false" title="Groceries">&#129382;</button>
-    <button class="chip icon-only" data-cat="household" type="button" aria-pressed="false" title="Household">&#129532;</button>
-    <button class="chip icon-only" data-cat="clothing" type="button" aria-pressed="false" title="Clothing">&#128084;</button>
-    <button class="chip icon-only" data-cat="health" type="button" aria-pressed="false" title="Health">&#128138;</button>
-    <button class="chip icon-only" data-cat="home" type="button" aria-pressed="false" title="Home">&#129692;</button>
+    __CAT_BTNS__
     <select class="sort-select" id="sort" aria-label="Sort items">
       <option value="default">Sort: Default</option>
       <option value="disc">Biggest discount</option>
@@ -856,7 +1165,7 @@ PAGE_TEMPLATE = """<!doctype html>
       <option value="cat">Category</option>
     </select>
     <div class="cols-toggle">
-      <span>Per row</span>
+      <span>Cols</span>
       <span class="seg">
         <button type="button" data-cols="1" aria-pressed="false">1</button>
         <button type="button" data-cols="2" aria-pressed="true">2</button>
@@ -865,19 +1174,24 @@ PAGE_TEMPLATE = """<!doctype html>
   </div>
   <div class="list-bar" id="list-bar" hidden>
     <span class="list-sum" id="list-sum"></span>
-    <button class="chip" id="email-list" type="button">&#9993;&#65039; Email</button>
+    <button class="chip" id="img-toggle" type="button" title="Toggle compact text checklist mode">&#128444;&#65039; Compact Rows</button>
+    <button class="chip" id="tax-toggle" type="button" title="Estimate BC GST/PST by category">+ BC Tax</button>
+    <button class="chip" id="promote-next" type="button" hidden>&#128722; Move All to Cart</button>
+    <button class="chip" id="clear-got" type="button" hidden>&#10003; Clear Got-It</button>
+    <button class="chip" id="copy-list" type="button">&#128203; Copy</button>
     <button class="chip" id="share-list" type="button">&#128279; Share</button>
     <button class="chip danger" id="clear-list" type="button">Clear</button>
   </div>
 </div>
 <div class="meta">
-  📍 Store Location: <b>__LOCATION__</b><br>
+  &#128205; Store Location: <b>__LOCATION__</b><br>
   __VALID_LINE__
   Showing <b id="shown-count">__TOTAL__</b> of <b>__TOTAL__</b> items &middot; updated __STAMP__<br>
   Source: <a href="__SOURCE_URL__">__SOURCE_NAME__</a>
 </div>
 <main class="grid c2" id="grid">
 __CARDS__
+<div class="db-results" id="db-results" hidden></div>
 <p class="empty" id="no-match" hidden></p>
 </main>
 
@@ -891,13 +1205,20 @@ __CARDS__
 
 <button class="top-btn" id="top-btn" type="button" aria-label="Back to top" title="Back to top">&#8593;</button>
 <script>
+window.__PAGE_HIST__ = __EMBEDDED_HIST__;
 (function () {
-  var LIST_KEY = 'cocowest_shopping_list';
+  var STORE_KEY = 'cocowest_saved_v2';
+  var LEGACY_LIST_KEY = 'cocowest_shopping_list';
   var COLS_KEY = 'cocowest_cols';
   var HIDE_EXP_KEY = 'cocowest_hide_expired';
+  var NO_IMG_KEY = 'cocowest_no_img';
+  var TAX_KEY = 'cocowest_bc_tax';
   var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   var DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   var NL = String.fromCharCode(10);
+
+  // BC Tax Rates by category (groceries 0%, health/OTC/vitamins ~5% GST, general merchandise 12% GST+PST)
+  var BC_TAX_RATES = { groceries: 0, health: 0.05, appliances: 0.12, electronics: 0.12, household: 0.12, clothing: 0.12, home: 0.12, other: 0.12 };
 
   function load(key, fallback) {
     try {
@@ -922,27 +1243,40 @@ __CARDS__
     return { cls: 'week', text: 'Ends ' + DAYS[end.getDay()], inWeek: true, expired: false };
   }
 
-  function hashUrl(s) {
+  function hashStr(s) {
     var h = 5381;
     for (var i = 0; i < s.length; i++) { h = ((h << 5) + h + s.charCodeAt(i)) | 0; }
     return (h >>> 0).toString(36);
   }
 
   var q = document.getElementById('q');
+  var quickAdd = document.getElementById('quick-add');
+  var quickAddLabel = document.getElementById('quick-add-label');
+  var addCustomCartBtn = document.getElementById('add-custom-cart');
+  var addCustomNextBtn = document.getElementById('add-custom-next');
+  var searchHistBtn = document.getElementById('search-hist-btn');
+  var dbResults = document.getElementById('db-results');
+
   var grid = document.getElementById('grid');
   var listBtn = document.getElementById('list-toggle');
+  var nextBtn = document.getElementById('next-toggle');
   var newBtn = document.getElementById('new-toggle');
   var saleBtn = document.getElementById('sale-toggle');
+  var atlBtn = document.getElementById('atl-toggle');
   var clrBtn = document.getElementById('clr-toggle');
-  var weekBtn = document.getElementById('week-toggle');
-  var wkHideBtn = document.getElementById('wkhide-toggle');
+  var weekCycleBtn = document.getElementById('week-cycle');
   var expBtn = document.getElementById('exp-toggle');
   var repBtn = document.getElementById('rep-toggle');
   var sortSel = document.getElementById('sort');
   var catBtns = Array.prototype.slice.call(document.querySelectorAll('[data-cat]'));
+
   var listBar = document.getElementById('list-bar');
   var listSum = document.getElementById('list-sum');
-  var emailBtn = document.getElementById('email-list');
+  var imgToggleBtn = document.getElementById('img-toggle');
+  var taxToggleBtn = document.getElementById('tax-toggle');
+  var promoteNextBtn = document.getElementById('promote-next');
+  var clearGotBtn = document.getElementById('clear-got');
+  var copyBtn = document.getElementById('copy-list');
   var shareBtn = document.getElementById('share-list');
   var clearBtn = document.getElementById('clear-list');
   var resetBtn = document.getElementById('reset-btn');
@@ -950,125 +1284,316 @@ __CARDS__
   var shownEl = document.getElementById('shown-count');
   var emptyMsg = document.getElementById('no-match');
   var colBtns = Array.prototype.slice.call(document.querySelectorAll('[data-cols]'));
-  var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
-  var checks = Array.prototype.slice.call(document.querySelectorAll('.shop-check'));
+
   var modal = document.getElementById('sku-modal');
   var modalClose = document.getElementById('modal-close');
   var modalTitle = document.getElementById('modal-title');
   var modalBody = document.getElementById('modal-body');
+
+  var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
   var origOrder = cards.slice();
+  var cardMetaMap = {};
+  var hashToIdent = {};
 
-  var hashToUrl = {};
-  cards.forEach(function (el) { hashToUrl[hashUrl(el.getAttribute('data-url'))] = el.getAttribute('data-url'); });
-
-  var priceDb = null;
-  function fetchPriceDb(cb) {
-    if (priceDb) return cb(priceDb);
-    fetch('state.json?t=' + Date.now()).then(function(res){ return res.json(); }).then(function(data){
-      priceDb = data.price_db || {};
-      cb(priceDb);
-    }).catch(function(){ cb({}); });
-  }
-
-  cards.forEach(function(card) {
-    var ident = card.getAttribute('data-ident');
-    var name = card.getAttribute('data-name');
-    var sku = card.getAttribute('data-sku');
-    var trigger = card.querySelector('figcaption');
-    var skuBadge = card.querySelector('.sku-badge');
-
-    function showModal() {
-      modalTitle.textContent = name;
-      modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Loading recorded price history...</p>';
-      modal.hidden = false;
-
-      fetchPriceDb(function(db) {
-        var item = db[ident];
-        var historyArr = item && item.history ? item.history : [];
-        var externalLinkHtml = sku ? '<p style="font-size:.80rem;margin-top:.8rem;text-align:right;"><a href="https://www.cocowest.ca/item/' + sku + '" target="_blank" rel="noopener" style="color:var(--accent);">View original on CocoWest &rarr;</a></p>' : '';
-        
-        if (!historyArr.length) {
-          modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price data recorded yet for this item.</p>' + externalLinkHtml;
-          return;
-        }
-        var html = '<p style="color:var(--muted);font-size:.85rem;">Recorded Price History:</p><ul class="hist-list">';
-        historyArr.slice().reverse().forEach(function(h) {
-          html += '<li class="hist-item"><span><b>' + h.date + '</b></span><span>$' + Number(h.price).toFixed(2) + (h.pct ? ' (' + h.pct + '% off)' : '') + '</span></li>';
-        });
-        html += '</ul>' + externalLinkHtml;
-        modalBody.innerHTML = html;
-      });
-    }
-
-    if (trigger) trigger.addEventListener('click', showModal);
-    if (skuBadge) skuBadge.addEventListener('click', showModal);
-  });
-
-  modalClose.addEventListener('click', function() { modal.hidden = true; });
-  modal.addEventListener('click', function(e) { if (e.target === modal) modal.hidden = true; });
-
-  var shoppingList = load(LIST_KEY, []);
-  if (!Array.isArray(shoppingList)) shoppingList = [];
-  var state = {
-    listOnly: false, newOnly: false, saleOnly: false, clrOnly: false, weekOnly: false, hideWeek: false,
-    hideExp: !!load(HIDE_EXP_KEY, false), hideRep: false, activeCat: '', sort: 'default'
-  };
-
-  var now = new Date();
-  var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  cards.forEach(function (el) {
-    var s = el.getAttribute('data-end');
-    var badge = el.querySelector('.end-badge');
-    if (!s || !badge) return;
-    var r = classifyEnd(s, today);
-    badge.className = 'end-badge ' + r.cls;
-    badge.textContent = r.text;
-    badge.hidden = false;
-    if (r.expired) el.classList.add('is-expired');
-    if (r.inWeek) el.setAttribute('data-week', '1');
-  });
-
-  function countWhere(fn) {
-    var n = 0;
-    cards.forEach(function (el) { if (fn(el)) n++; });
-    return n;
-  }
   function num(el, attr) {
     var v = parseFloat(el.getAttribute(attr));
     return isNaN(v) ? null : v;
   }
 
-  if (newBtn) {
-    newBtn.innerHTML = '&#10024; New (' + countWhere(function (el) { return el.classList.contains('is-new'); }) + ')';
-  }
-  saleBtn.innerHTML = '&#128293; On Sale (' + countWhere(function (el) { return el.classList.contains('is-sale'); }) + ')';
-  clrBtn.innerHTML = '&#127991;&#65039; Clearance (' + countWhere(function (el) { return el.classList.contains('is-clr'); }) + ')';
-  var weekCount = countWhere(function (el) { return el.getAttribute('data-week') === '1'; });
-  weekBtn.innerHTML = '&#9200; Ends this week (' + weekCount + ')';
-  if (weekCount > 0) {
-    wkHideBtn.hidden = false;
-    wkHideBtn.innerHTML = '&#128683; Hide ending this week (' + weekCount + ')';
-  } else {
-    wkHideBtn.hidden = true;
+  // Load saved items map: { [ident]: { status: 'cart'|'next', qty: 1, got: false, name, url, sku, cat, price, disc, end, custom } }
+  var savedMap = load(STORE_KEY, null);
+  if (!savedMap || typeof savedMap !== 'object' || Array.isArray(savedMap)) {
+    savedMap = {};
+    var legacyUrls = load(LEGACY_LIST_KEY, []);
+    if (Array.isArray(legacyUrls) && legacyUrls.length) {
+      cards.forEach(function (el) {
+        if (legacyUrls.indexOf(el.getAttribute('data-url')) !== -1) {
+          var id = el.getAttribute('data-ident');
+          savedMap[id] = extractCardData(el, 'cart', 1, false);
+        }
+      });
+    }
+    save(STORE_KEY, savedMap);
   }
 
-  var expCount = countWhere(function (el) { return el.classList.contains('is-expired'); });
+  function extractCardData(el, status, qty, got) {
+    return {
+      status: status || 'cart',
+      qty: qty || 1,
+      got: !!got,
+      name: el.getAttribute('data-name') || '',
+      url: el.getAttribute('data-url') || '',
+      sku: el.getAttribute('data-sku') || '',
+      cat: el.getAttribute('data-cat') || 'other',
+      price: num(el, 'data-price'),
+      disc: num(el, 'data-disc'),
+      end: el.getAttribute('data-end') || '',
+      custom: el.getAttribute('data-custom') === '1'
+    };
+  }
+
+  var state = {
+    viewMode: 'all', // 'all' | 'cart' | 'next'
+    newOnly: false, saleOnly: false, atlOnly: false, clrOnly: false,
+    weekMode: 0, // 0 = off, 1 = only ending this week, 2 = hide ending this week
+    hideExp: !!load(HIDE_EXP_KEY, false), hideRep: false,
+    noImg: !!load(NO_IMG_KEY, false), bcTax: !!load(TAX_KEY, false),
+    activeCat: '', sort: 'default'
+  };
+
+  var now = new Date();
+  var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+  function buildCarryoverCard(id, item) {
+    var fig = document.createElement('figure');
+    fig.className = 'card is-carryover';
+    fig.setAttribute('data-ident', id);
+    fig.setAttribute('data-url', item.url || '');
+    fig.setAttribute('data-name', item.name || id);
+    fig.setAttribute('data-t', ((item.name || '') + ' ' + (item.sku || '')).toLowerCase());
+    fig.setAttribute('data-sku', item.sku || '');
+    fig.setAttribute('data-cat', item.cat || 'other');
+    fig.setAttribute('data-idx', String(90000 + origOrder.length));
+    if (item.custom) fig.setAttribute('data-custom', '1');
+    if (item.price !== null && item.price !== undefined) fig.setAttribute('data-price', Number(item.price).toFixed(2));
+    if (item.disc) fig.setAttribute('data-disc', String(item.disc));
+    if (item.end) fig.setAttribute('data-end', item.end);
+
+    var tagHtml = item.custom
+      ? '<div class="new-tag custom">&#9998; Custom</div>'
+      : '<div class="new-tag carry">&#128204; Saved Item</div>';
+    var imgPart = item.url
+      ? '<a href="' + item.url + '" target="_blank" rel="noopener"><img src="' + item.url + '" alt="" loading="lazy" referrerpolicy="no-referrer"></a>'
+      : '';
+    var skuPart = item.sku ? '<span class="sku-badge">#' + item.sku + '</span>' : '';
+    var pTxt = (item.price !== null && item.price !== undefined && (item.name || '').indexOf('$') === -1)
+      ? ' ($' + Number(item.price).toFixed(2) + ')'
+      : '';
+
+    fig.innerHTML =
+      tagHtml + imgPart +
+      '<figcaption>' + (item.name || id) + pTxt + '</figcaption>' +
+      '<div class="card-footer">' +
+        '<div class="card-actions">' +
+          '<label class="shop-label"><input type="checkbox" class="shop-check" data-ident="' + id + '"> Cart</label>' +
+          '<button type="button" class="mini-btn next-item-btn" data-ident="' + id + '" title="Save for next week">&#128204; Next</button>' +
+          '<button type="button" class="mini-btn qty-btn" data-ident="' + id + '" hidden>&times;1</button>' +
+          '<button type="button" class="mini-btn got-btn" data-ident="' + id + '" hidden>&#10003;</button>' +
+        '</div>' +
+        '<span class="foot-right">' + skuPart + '<span class="end-badge" hidden></span></span>' +
+      '</div>';
+
+    grid.insertBefore(fig, dbResults);
+    cards.push(fig);
+    origOrder.push(fig);
+    initCard(fig);
+    return fig;
+  }
+
+  function syncCardControls(el, id) {
+    var entry = savedMap[id];
+    var chk = el.querySelector('.shop-check');
+    var nxt = el.querySelector('.next-item-btn');
+    var qtyBtn = el.querySelector('.qty-btn');
+    var gotBtn = el.querySelector('.got-btn');
+    var inCart = !!(entry && entry.status === 'cart');
+    var inNext = !!(entry && entry.status === 'next');
+
+    if (chk) chk.checked = inCart;
+    if (nxt) nxt.classList.toggle('active', inNext);
+    if (qtyBtn) {
+      qtyBtn.hidden = !entry;
+      qtyBtn.innerHTML = '&times;' + (entry ? (entry.qty || 1) : 1);
+    }
+    if (gotBtn) {
+      gotBtn.hidden = !inCart;
+      gotBtn.classList.toggle('got-active', !!(entry && entry.got));
+    }
+    el.classList.toggle('is-got', !!(inCart && entry && entry.got));
+  }
+
+  var fullPriceDb = null;
+  function fetchFullPriceDb(cb) {
+    if (fullPriceDb) return cb(fullPriceDb);
+    fetch('state.json?t=' + Date.now()).then(function (r) { return r.json(); }).then(function (d) {
+      fullPriceDb = d.price_db || {};
+      cb(fullPriceDb);
+    }).catch(function () { cb({}); });
+  }
+
+  function showHistoryModal(ident, name, sku) {
+    modalTitle.textContent = name;
+    modal.hidden = false;
+    var ext = sku ? '<p style="font-size:.8rem;margin-top:.8rem;text-align:right;"><a href="https://www.cocowest.ca/?s=' + encodeURIComponent(sku) + '" target="_blank" rel="noopener" style="color:var(--accent);">Search #' + sku + ' on CocoWest &rarr;</a></p>' : '';
+
+    function renderHist(histArr) {
+      if (!histArr || !histArr.length) {
+        modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">No historical price data recorded yet for this item.</p>' + ext;
+        return;
+      }
+      var low = Math.min.apply(null, histArr.map(function (h) { return Number(h.price); }));
+      var html = '<p style="color:var(--muted);font-size:.82rem;">Recorded Price History (Lowest: <b>$' + low.toFixed(2) + '</b>):</p><ul class="hist-list">';
+      histArr.slice().reverse().forEach(function (h) {
+        var isLow = Number(h.price) <= low && histArr.length > 1;
+        html += '<li class="hist-item"><span><b>' + h.date + '</b></span><span>$' + Number(h.price).toFixed(2) +
+                (h.pct ? ' (' + h.pct + '% off)' : '') + (isLow ? ' &#128293;' : '') + '</span></li>';
+      });
+      html += '</ul>' + ext;
+      modalBody.innerHTML = html;
+    }
+
+    if (window.__PAGE_HIST__ && window.__PAGE_HIST__[ident]) {
+      renderHist(window.__PAGE_HIST__[ident]);
+    } else {
+      modalBody.innerHTML = '<p style="color:var(--muted);font-size:.85rem;">Loading recorded price history...</p>';
+      fetchFullPriceDb(function (db) {
+        renderHist(db[ident] && db[ident].history ? db[ident].history : []);
+      });
+    }
+  }
+
+  function initCard(el) {
+    var id = el.getAttribute('data-ident');
+    var url = el.getAttribute('data-url') || '';
+    var name = el.getAttribute('data-name') || '';
+    var sku = el.getAttribute('data-sku') || '';
+    var sEnd = el.getAttribute('data-end');
+    var badge = el.querySelector('.end-badge');
+    if (sEnd && badge) {
+      var r = classifyEnd(sEnd, today);
+      badge.className = 'end-badge ' + r.cls;
+      badge.textContent = r.text;
+      badge.hidden = false;
+      if (r.expired) el.classList.add('is-expired');
+      if (r.inWeek) el.setAttribute('data-week', '1');
+    }
+
+    hashToIdent[hashStr(id)] = id;
+    if (url) hashToIdent[hashStr(url)] = id;
+
+    // Cache metadata for fast keystroke filtering
+    cardMetaMap[id] = {
+      el: el,
+      t: el.getAttribute('data-t') || '',
+      cat: el.getAttribute('data-cat') || 'other',
+      price: num(el, 'data-price'),
+      disc: num(el, 'data-disc'),
+      end: sEnd || '',
+      idx: Number(el.getAttribute('data-idx') || 0),
+      isNew: el.classList.contains('is-new'),
+      isSale: el.classList.contains('is-sale'),
+      isAtl: el.classList.contains('is-atl'),
+      isClr: el.classList.contains('is-clr'),
+      isExp: el.classList.contains('is-expired'),
+      isWeek: el.getAttribute('data-week') === '1',
+      isSeen: el.getAttribute('data-seen') === '1',
+      isFlyer: el.getAttribute('data-flyer') === '1',
+      isCarry: el.classList.contains('is-carryover')
+    };
+
+    // Update saved entry with latest flyer details if present on page
+    if (savedMap[id] && !el.classList.contains('is-carryover')) {
+      savedMap[id] = extractCardData(el, savedMap[id].status, savedMap[id].qty, savedMap[id].got);
+    }
+
+    var figCap = el.querySelector('figcaption');
+    var skuBadge = el.querySelector('.sku-badge');
+    if (figCap) figCap.addEventListener('click', function () { showHistoryModal(id, name, sku); });
+    if (skuBadge) skuBadge.addEventListener('click', function () { showHistoryModal(id, name, sku); });
+
+    var chk = el.querySelector('.shop-check');
+    var nxt = el.querySelector('.next-item-btn');
+    var qtyBtn = el.querySelector('.qty-btn');
+    var gotBtn = el.querySelector('.got-btn');
+
+    if (chk) {
+      chk.addEventListener('change', function () {
+        if (chk.checked) {
+          var prevQty = savedMap[id] ? savedMap[id].qty : 1;
+          savedMap[id] = extractCardData(el, 'cart', prevQty, false);
+        } else {
+          delete savedMap[id];
+        }
+        save(STORE_KEY, savedMap);
+        syncCardControls(el, id);
+        render();
+      });
+    }
+    if (nxt) {
+      nxt.addEventListener('click', function () {
+        if (savedMap[id] && savedMap[id].status === 'next') {
+          delete savedMap[id];
+        } else {
+          var prevQty = savedMap[id] ? savedMap[id].qty : 1;
+          savedMap[id] = extractCardData(el, 'next', prevQty, false);
+        }
+        save(STORE_KEY, savedMap);
+        syncCardControls(el, id);
+        render();
+      });
+    }
+    if (qtyBtn) {
+      qtyBtn.addEventListener('click', function () {
+        if (!savedMap[id]) return;
+        savedMap[id].qty = ((savedMap[id].qty || 1) % 5) + 1;
+        save(STORE_KEY, savedMap);
+        syncCardControls(el, id);
+        render();
+      });
+    }
+    if (gotBtn) {
+      gotBtn.addEventListener('click', function () {
+        if (!savedMap[id]) return;
+        savedMap[id].got = !savedMap[id].got;
+        save(STORE_KEY, savedMap);
+        syncCardControls(el, id);
+        render();
+      });
+    }
+    syncCardControls(el, id);
+  }
+
+  cards.forEach(initCard);
+
+  // Inject carryover/custom cards from savedMap that are not in this post
+  Object.keys(savedMap).forEach(function (id) {
+    if (!cardMetaMap[id]) {
+      buildCarryoverCard(id, savedMap[id]);
+    }
+  });
+  save(STORE_KEY, savedMap);
+
+  modalClose.addEventListener('click', function () { modal.hidden = true; });
+  modal.addEventListener('click', function (e) { if (e.target === modal) modal.hidden = true; });
+
+  var weekCount = 0, expCount = 0;
+  origOrder.forEach(function (el) {
+    var m = cardMetaMap[el.getAttribute('data-ident')];
+    if (!m || m.isCarry) return;
+    if (m.isWeek) weekCount++;
+    if (m.isExp) expCount++;
+  });
+
+  function updateWeekBtnLabel() {
+    if (state.weekMode === 1) {
+      weekCycleBtn.innerHTML = '&#9200; Only Ends This Wk (' + weekCount + ')';
+      weekCycleBtn.className = 'chip active';
+    } else if (state.weekMode === 2) {
+      weekCycleBtn.innerHTML = '&#128683; Hiding Ends This Wk (' + weekCount + ')';
+      weekCycleBtn.className = 'chip warn-active';
+    } else {
+      weekCycleBtn.innerHTML = '&#9200; Ends This Wk (' + weekCount + ')';
+      weekCycleBtn.className = 'chip';
+    }
+  }
+  updateWeekBtnLabel();
+
   if (expCount > 0) {
     expBtn.hidden = false;
-    expBtn.innerHTML = '&#128584; Hide expired (' + expCount + ')';
+    expBtn.innerHTML = '&#128584; Hide Expired (' + expCount + ')';
   } else {
     expBtn.hidden = true;
     state.hideExp = false;
-  }
-
-  function inList(url) { return shoppingList.indexOf(url) !== -1; }
-
-  function listCountOnPage() {
-    return countWhere(function (el) { return inList(el.getAttribute('data-url')); });
-  }
-
-  function listItems() {
-    return origOrder.filter(function (el) { return inList(el.getAttribute('data-url')); });
   }
 
   function setToggle(btn, active) {
@@ -1086,74 +1611,277 @@ __CARDS__
       if (b === null) return -1;
       return dir * (a - b);
     }
-    list.sort(function (a, b) {
-      var fa = a.getAttribute('data-flyer') === '1', fb = b.getAttribute('data-flyer') === '1';
-      if (fa && !fb) return -1;
-      if (!fa && fb) return 1;
+    list.sort(function (elA, elB) {
+      var a = cardMetaMap[elA.getAttribute('data-ident')];
+      var b = cardMetaMap[elB.getAttribute('data-ident')];
+      if (a.isFlyer !== b.isFlyer) return a.isFlyer ? -1 : 1;
 
       var r = 0;
       if (key === 'disc') {
-        r = cmpNullLast(num(a, 'data-disc'), num(b, 'data-disc'), -1);
+        r = cmpNullLast(a.disc, b.disc, -1);
       } else if (key === 'plow') {
-        r = cmpNullLast(num(a, 'data-price'), num(b, 'data-price'), 1);
+        r = cmpNullLast(a.price, b.price, 1);
       } else if (key === 'phigh') {
-        r = cmpNullLast(num(a, 'data-price'), num(b, 'data-price'), -1);
+        r = cmpNullLast(a.price, b.price, -1);
       } else if (key === 'end') {
-        var xa = a.classList.contains('is-expired'), xb = b.classList.contains('is-expired');
-        var ea = a.getAttribute('data-end'), eb = b.getAttribute('data-end');
-        if (xa !== xb) r = xa ? 1 : -1;
-        else if (ea && !eb) r = -1;
-        else if (!ea && eb) r = 1;
-        else if (ea && eb) r = ea < eb ? -1 : (ea > eb ? 1 : 0);
+        if (a.isExp !== b.isExp) r = a.isExp ? 1 : -1;
+        else if (a.end && !b.end) r = -1;
+        else if (!a.end && b.end) r = 1;
+        else if (a.end && b.end) r = a.end < b.end ? -1 : (a.end > b.end ? 1 : 0);
       } else if (key === 'endlate') {
-        var la = a.getAttribute('data-end'), lb = b.getAttribute('data-end');
-        if (la && !lb) r = -1;
-        else if (!la && lb) r = 1;
-        else if (la && lb) r = la > lb ? -1 : (la < lb ? 1 : 0);
+        if (a.end && !b.end) r = -1;
+        else if (!a.end && b.end) r = 1;
+        else if (a.end && b.end) r = a.end > b.end ? -1 : (a.end < b.end ? 1 : 0);
       } else if (key === 'cat') {
-        var ca = a.getAttribute('data-cat'), cb = b.getAttribute('data-cat');
-        r = ca < cb ? -1 : (ca > cb ? 1 : 0);
+        r = a.cat < b.cat ? -1 : (a.cat > b.cat ? 1 : 0);
       }
-      return r || (Number(a.getAttribute('data-idx')) - Number(b.getAttribute('data-idx')));
+      return r || (a.idx - b.idx);
     });
-    list.forEach(function (el) { grid.appendChild(el); });
-    grid.appendChild(emptyMsg);
+    var frag = document.createDocumentFragment();
+    list.forEach(function (el) { frag.appendChild(el); });
+    frag.appendChild(dbResults);
+    frag.appendChild(emptyMsg);
+    grid.appendChild(frag);
   }
+
+  function addOrUpdateItem(id, itemData) {
+    savedMap[id] = itemData;
+    save(STORE_KEY, savedMap);
+    if (!cardMetaMap[id]) {
+      buildCarryoverCard(id, itemData);
+    } else {
+      syncCardControls(cardMetaMap[id].el, id);
+    }
+    render();
+  }
+
+  function createCustomFromQuery(targetStatus) {
+    var raw = q.value.trim();
+    if (!raw) return;
+    var priceMatch = /\$?\s*(\d+(?:\.\d{1,2})?)\s*$/.exec(raw);
+    var parsedPrice = null;
+    var cleanName = raw;
+    if (priceMatch && raw.replace(priceMatch[0], '').trim().length >= 2) {
+      parsedPrice = parseFloat(priceMatch[1]);
+      cleanName = raw.replace(priceMatch[0], '').trim();
+    }
+    var detectedCat = state.activeCat || (
+      /\b(milk|egg|bread|chicken|beef|pork|salmon|cheese|butter|yogurt|fruit|apple|banana|berry|salad|spinach|bok\s*choy|cauliflower|rice|pasta|coffee|tea|coke|soda|water|juice|chips|snack|nuts|chia|oats|cereal|sauce|oil|honey|pizza|dumpling|tofu|bacon|sausage|steak|bagel|croissant|muffin)\b/i.test(cleanName)
+        ? 'groceries'
+        : 'other'
+    );
+    var id = 'custom:' + hashStr(cleanName.toLowerCase());
+    addOrUpdateItem(id, {
+      status: targetStatus,
+      qty: 1,
+      got: false,
+      name: cleanName + (parsedPrice !== null ? ' ($' + parsedPrice.toFixed(2) + ')' : ''),
+      url: '',
+      sku: '',
+      cat: detectedCat,
+      price: parsedPrice,
+      disc: null,
+      end: '',
+      custom: true
+    });
+    q.value = '';
+    dbResults.hidden = true;
+    render();
+  }
+
+  addCustomCartBtn.addEventListener('click', function () { createCustomFromQuery('cart'); });
+  addCustomNextBtn.addEventListener('click', function () { createCustomFromQuery('next'); });
+  q.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && q.value.trim()) {
+      e.preventDefault();
+      createCustomFromQuery(state.viewMode === 'next' ? 'next' : 'cart');
+    }
+  });
+
+  function runPastCatalogSearch() {
+    var term = q.value.trim().toLowerCase();
+    if (term.length < 2) return;
+    dbResults.hidden = false;
+    dbResults.innerHTML = '<h4>Searching historical CocoWest catalog...</h4>';
+
+    fetchFullPriceDb(function (db) {
+      var matches = [];
+      Object.keys(db).forEach(function (id) {
+        if (cardMetaMap[id] && !cardMetaMap[id].isCarry) return;
+        var entry = db[id];
+        var hay = ((entry.name || '') + ' ' + (entry.item_no || '')).toLowerCase();
+        if (hay.indexOf(term) !== -1) {
+          matches.push({ id: id, entry: entry });
+        }
+      });
+
+      var html = '<h4>Past CocoWest Catalog Matches (' + matches.length + ')</h4>';
+      matches.slice(0, 15).forEach(function (m) {
+        var e = m.entry;
+        var lastHist = e.history && e.history.length ? e.history[e.history.length - 1] : null;
+        var lastPrice = lastHist ? lastHist.price : null;
+        var priceTxt = lastPrice !== null ? '$' + Number(lastPrice).toFixed(2) + ' (last seen ' + lastHist.date + ')' : 'No price recorded';
+        var imgTag = e.url ? '<img src="' + e.url + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : '';
+        html += '<div class="db-row" data-dbid="' + m.id + '">' +
+                  '<div style="display:flex;align-items:center;gap:.55rem;min-width:0;">' + imgTag +
+                    '<div style="overflow:hidden;text-overflow:ellipsis;"><b>' + (e.name || m.id) + '</b><br><span style="color:var(--muted);">' + priceTxt + '</span></div>' +
+                  '</div>' +
+                  '<div style="display:flex;gap:.3rem;flex-shrink:0;">' +
+                    '<button type="button" class="chip active db-add-cart" data-id="' + m.id + '">+ Cart</button>' +
+                    '<button type="button" class="chip next-active db-add-next" data-id="' + m.id + '">&#128204; Next</button>' +
+                  '</div>' +
+                '</div>';
+      });
+      html += '<div style="margin-top:.65rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">' +
+                '<button type="button" class="chip" id="live-wp-search">&#127760; Search CocoWest.ca Live Media API</button>' +
+                '<span id="live-wp-status" style="font-size:.78rem;color:var(--muted);"></span>' +
+              '</div>';
+      dbResults.innerHTML = html;
+
+      function bindDbBtns(container) {
+        Array.prototype.slice.call(container.querySelectorAll('.db-add-cart, .db-add-next')).forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var id = btn.getAttribute('data-id');
+            var target = btn.classList.contains('db-add-next') ? 'next' : 'cart';
+            var e = db[id];
+            if (!e) return;
+            var lastH = e.history && e.history.length ? e.history[e.history.length - 1] : null;
+            addOrUpdateItem(id, {
+              status: target, qty: 1, got: false,
+              name: e.name || id, url: e.url || '', sku: e.item_no || '',
+              cat: e.cat || 'other', price: lastH ? lastH.price : null, disc: null, end: '', custom: false
+            });
+            btn.textContent = 'Added!';
+          });
+        });
+      }
+      bindDbBtns(dbResults);
+
+      var liveBtn = document.getElementById('live-wp-search');
+      var liveStatus = document.getElementById('live-wp-status');
+      if (liveBtn) {
+        liveBtn.addEventListener('click', function () {
+          liveStatus.textContent = 'Querying CocoWest WordPress API...';
+          var wpUrl = 'https://www.cocowest.ca/wp-json/wp/v2/media?search=' + encodeURIComponent(term) + '&per_page=10';
+          var proxyUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(wpUrl);
+          fetch(proxyUrl).then(function (r) { return r.json(); }).then(function (arr) {
+            if (!Array.isArray(arr) || !arr.length) {
+              liveStatus.textContent = 'No live media found on CocoWest.';
+              return;
+            }
+            liveStatus.textContent = 'Found ' + arr.length + ' live items:';
+            arr.forEach(function (media) {
+              var title = (media.title && media.title.rendered) ? media.title.rendered.replace(/<[^>]+>/g, '') : '';
+              var alt = media.alt_text || title || 'CocoWest Item';
+              var src = media.source_url || '';
+              var skuMatch = /^\s*(\d{5,8})\b/.exec(alt);
+              var sku = skuMatch ? skuMatch[1] : '';
+              var id = sku ? ('no:' + sku) : ('wp:' + media.id);
+              var pMatch = /\$\s*(\d[\d,]*\.\d{2})\b/.exec(alt);
+              var pVal = pMatch ? parseFloat(pMatch[1].replace(',', '')) : null;
+              db[id] = {
+                name: alt, item_no: sku, url: src, cat: 'other',
+                history: pVal !== null ? [{ date: 'Live', price: pVal }] : []
+              };
+              var row = document.createElement('div');
+              row.className = 'db-row';
+              row.innerHTML =
+                '<div style="display:flex;align-items:center;gap:.55rem;min-width:0;">' +
+                  (src ? '<img src="' + src + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : '') +
+                  '<div><b>' + alt + '</b><br><span style="color:var(--muted);">Live CocoWest Result</span></div>' +
+                '</div>' +
+                '<div style="display:flex;gap:.3rem;flex-shrink:0;">' +
+                  '<button type="button" class="chip active db-add-cart" data-id="' + id + '">+ Cart</button>' +
+                  '<button type="button" class="chip next-active db-add-next" data-id="' + id + '">&#128204; Next</button>' +
+                '</div>';
+              dbResults.appendChild(row);
+              bindDbBtns(row);
+            });
+          }).catch(function () {
+            liveStatus.textContent = 'Live search blocked by Cloudflare; use + Add to Cart above for manual entry.';
+          });
+        });
+      }
+    });
+  }
+
+  searchHistBtn.addEventListener('click', runPastCatalogSearch);
 
   function render() {
     var t = q.value.trim().toLowerCase();
+    quickAdd.hidden = t.length === 0;
+    if (t.length > 0) {
+      quickAddLabel.innerHTML = 'Custom item: <b>' + q.value.trim().replace(/</g, '&lt;') + '</b>';
+    } else {
+      dbResults.hidden = true;
+    }
+
+    grid.classList.toggle('no-img', state.noImg);
+    setToggle(imgToggleBtn, state.noImg);
+    setToggle(taxToggleBtn, state.bcTax);
+
     var shown = 0;
-    cards.forEach(function (el) {
-      var ok = (!t || el.getAttribute('data-t').indexOf(t) !== -1) &&
-               (!state.newOnly || el.classList.contains('is-new')) &&
-               (!state.saleOnly || el.classList.contains('is-sale')) &&
-               (!state.clrOnly || el.classList.contains('is-clr')) &&
-               (!state.weekOnly || el.getAttribute('data-week') === '1') &&
-               (!state.hideWeek || el.getAttribute('data-week') !== '1') &&
-               (!state.hideExp || !el.classList.contains('is-expired')) &&
-               (!state.hideRep || el.getAttribute('data-seen') !== '1') &&
-               (!state.activeCat || el.getAttribute('data-cat') === state.activeCat) &&
-               (!state.listOnly || inList(el.getAttribute('data-url')));
+    var cartCount = 0, nextCount = 0, gotCount = 0;
+    var cartSubtotal = 0, cartTax = 0, cartUnpriced = 0;
+    var nextSubtotal = 0;
+
+    Object.keys(savedMap).forEach(function (id) {
+      var item = savedMap[id];
+      var qty = item.qty || 1;
+      var p = item.price;
+      var rate = BC_TAX_RATES[item.cat || 'other'] || 0;
+      if (item.status === 'cart') {
+        cartCount++;
+        if (item.got) gotCount++;
+        if (p === null || p === undefined) cartUnpriced++;
+        else {
+          cartSubtotal += p * qty;
+          cartTax += p * qty * rate;
+        }
+      } else if (item.status === 'next') {
+        nextCount++;
+        if (p !== null && p !== undefined) nextSubtotal += p * qty;
+      }
+    });
+
+    origOrder.forEach(function (el) {
+      var id = el.getAttribute('data-ident');
+      var m = cardMetaMap[id];
+      var saved = savedMap[id];
+      var inCart = !!(saved && saved.status === 'cart');
+      var inNext = !!(saved && saved.status === 'next');
+
+      var modeOk = true;
+      if (state.viewMode === 'cart') modeOk = inCart;
+      else if (state.viewMode === 'next') modeOk = inNext;
+      else modeOk = !m.isCarry; // Hide carryover/custom items in main flyer browse view unless in Cart/Next view
+
+      var ok = modeOk &&
+               (!t || m.t.indexOf(t) !== -1) &&
+               (!state.newOnly || m.isNew) &&
+               (!state.saleOnly || m.isSale) &&
+               (!state.atlOnly || m.isAtl) &&
+               (!state.clrOnly || m.isClr) &&
+               (state.weekMode !== 1 || m.isWeek) &&
+               (state.weekMode !== 2 || !m.isWeek) &&
+               (!state.hideExp || !m.isExp) &&
+               (!state.hideRep || !m.isSeen) &&
+               (!state.activeCat || m.cat === state.activeCat);
       el.hidden = !ok;
       if (ok) shown++;
     });
 
-    var n = 0, sum = 0, unpriced = 0;
-    cards.forEach(function (el) {
-      if (!inList(el.getAttribute('data-url'))) return;
-      n++;
-      var p = num(el, 'data-price');
-      if (p === null) unpriced++; else sum += p;
-    });
+    listBtn.innerHTML = state.viewMode === 'cart' ? 'Show Flyer' : '&#128722; Cart (' + cartCount + ')';
+    listBtn.classList.toggle('active', state.viewMode === 'cart');
 
-    listBtn.innerHTML = state.listOnly ? 'Show all items' : '&#128722; List (' + n + ')';
-    listBtn.classList.toggle('active', state.listOnly);
+    nextBtn.innerHTML = state.viewMode === 'next' ? 'Show Flyer' : '&#128204; Next Wk (' + nextCount + ')';
+    nextBtn.classList.toggle('active', state.viewMode === 'next');
 
     setToggle(newBtn, state.newOnly);
     setToggle(saleBtn, state.saleOnly);
+    setToggle(atlBtn, state.atlOnly);
     setToggle(clrBtn, state.clrOnly);
-    setToggle(weekBtn, state.weekOnly);
-    setToggle(wkHideBtn, state.hideWeek);
+    updateWeekBtnLabel();
     setToggle(expBtn, state.hideExp);
     setToggle(repBtn, state.hideRep);
 
@@ -1161,126 +1889,170 @@ __CARDS__
       setToggle(btn, state.activeCat === btn.getAttribute('data-cat'));
     });
 
-    listBar.hidden = n === 0;
-    listSum.textContent = n + (n === 1 ? ' item' : ' items') + ' · $' + sum.toFixed(2) +
-                          (unpriced ? ' (+' + unpriced + ' unpriced)' : '');
+    var showBar = cartCount > 0 || nextCount > 0 || state.viewMode !== 'all';
+    listBar.hidden = !showBar;
+    promoteNextBtn.hidden = !(state.viewMode === 'next' && nextCount > 0);
+    clearGotBtn.hidden = !(gotCount > 0);
+
+    if (state.viewMode === 'next') {
+      listSum.textContent = 'Pinned for Next Week: ' + nextCount + ' item' + (nextCount === 1 ? '' : 's') +
+                            ' · $' + nextSubtotal.toFixed(2);
+    } else {
+      var displayTotal = state.bcTax ? (cartSubtotal + cartTax) : cartSubtotal;
+      var taxNote = state.bcTax ? ' (incl. $' + cartTax.toFixed(2) + ' tax)' : '';
+      listSum.textContent = 'Cart: ' + cartCount + (cartCount === 1 ? ' item' : ' items') +
+                            ' · $' + displayTotal.toFixed(2) + taxNote +
+                            (cartUnpriced ? ' (+' + cartUnpriced + ' unpriced)' : '');
+    }
+
     shownEl.textContent = shown;
 
     if (shown === 0) {
-      emptyMsg.textContent = (state.listOnly && n === 0)
-        ? 'Your list is empty. Tick "Add to list" on any item.'
-        : 'No items match your filters.';
+      if (t.length >= 2 && dbResults.hidden) {
+        runPastCatalogSearch();
+      }
+      emptyMsg.textContent = state.viewMode === 'cart'
+        ? 'Your cart is empty. Tick "Cart" on any item or type a custom item above.'
+        : state.viewMode === 'next'
+          ? 'No items saved for next week yet. Tap "📌 Next" on any card to save it.'
+          : 'No items on this post match your filter.';
     }
     emptyMsg.hidden = shown !== 0;
   }
 
+  // Import shared links (#list=...)
   (function importShared() {
     var m = /[#&]list=([0-9a-z.]+)/.exec(location.hash || '');
     if (!m) return;
-    var urls = [];
-    m[1].split('.').forEach(function (h) { if (hashToUrl[h]) urls.push(hashToUrl[h]); });
+    var ids = [];
+    m[1].split('.').forEach(function (h) { if (hashToIdent[h]) ids.push(hashToIdent[h]); });
     try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
-    if (!urls.length) {
-      window.alert('That shared list does not match any items on this page. It may be from an older post.');
-      return;
-    }
-    if (!window.confirm('Add ' + urls.length + ' shared item' + (urls.length === 1 ? '' : 's') + ' to your list?')) return;
-    urls.forEach(function (u) { if (!inList(u)) shoppingList.push(u); });
-    save(LIST_KEY, shoppingList);
-    state.listOnly = true;
+    if (!ids.length) return;
+    if (!window.confirm('Add ' + ids.length + ' shared item' + (ids.length === 1 ? '' : 's') + ' to your Cart?')) return;
+    ids.forEach(function (id) {
+      var cm = cardMetaMap[id];
+      if (cm) {
+        savedMap[id] = extractCardData(cm.el, 'cart', 1, false);
+        syncCardControls(cm.el, id);
+      }
+    });
+    save(STORE_KEY, savedMap);
+    state.viewMode = 'cart';
   })();
 
-  checks.forEach(function (chk) {
-    var url = chk.getAttribute('data-url');
-    chk.checked = inList(url);
-    chk.addEventListener('change', function () {
-      if (chk.checked) {
-        if (!inList(url)) shoppingList.push(url);
-      } else {
-        shoppingList = shoppingList.filter(function (u) { return u !== url; });
-      }
-      save(LIST_KEY, shoppingList);
-      render();
+  function activeBucketItems() {
+    var target = state.viewMode === 'next' ? 'next' : 'cart';
+    return Object.keys(savedMap).filter(function (id) { return savedMap[id].status === target; }).map(function (id) {
+      return { id: id, data: savedMap[id] };
     });
-  });
+  }
 
   function shareUrl() {
     var base = location.href.split('#')[0];
-    var hashes = listItems().map(function (el) { return hashUrl(el.getAttribute('data-url')); });
+    var hashes = activeBucketItems().map(function (it) { return hashStr(it.id); });
     return base + '#list=' + hashes.join('.');
   }
 
-  function itemLine(el) {
-    var name = (el.getAttribute('data-name') || '').replace(/ +/g, ' ').trim();
-    if (name.length > 100) name = name.slice(0, 97) + '...';
-    var p = num(el, 'data-price');
-    var d = num(el, 'data-disc');
-    var end = el.getAttribute('data-end');
-    var extra = [];
-    if (p !== null) extra.push('$' + p.toFixed(2));
-    if (d !== null) extra.push(d + '% off');
-    if (end) extra.push('ends ' + end);
-    return '- ' + name + (extra.length ? ' (' + extra.join(', ') + ')' : '');
+  function formatChecklistText() {
+    var items = activeBucketItems();
+    var title = state.viewMode === 'next' ? 'Costco Next Week List' : 'Costco Shopping List';
+    var lines = [title + ' (' + items.length + '):'];
+    var sum = 0;
+    items.forEach(function (it) {
+      var d = it.data;
+      var qStr = (d.qty && d.qty > 1) ? (d.qty + 'x ') : '';
+      var pStr = (d.price !== null && d.price !== undefined) ? (' - $' + (d.price * (d.qty || 1)).toFixed(2)) : '';
+      if (d.price !== null && d.price !== undefined) sum += d.price * (d.qty || 1);
+      var check = d.got ? '[x] ' : '[ ] ';
+      lines.push(check + qStr + d.name + pStr);
+    });
+    lines.push('Total: $' + sum.toFixed(2));
+    lines.push(shareUrl());
+    return lines.join(NL);
   }
 
-  emailBtn.addEventListener('click', function () {
-    var items = listItems();
+  copyBtn.addEventListener('click', function () {
+    var items = activeBucketItems();
     if (!items.length) return;
-    var sum = 0;
-    items.forEach(function (el) { var p = num(el, 'data-price'); if (p !== null) sum += p; });
-    var head = 'My Costco shopping list (' + items.length + ' item' + (items.length === 1 ? '' : 's' ) + '):' + NL + NL +
-               'Open it on the site: ' + shareUrl() + NL + NL;
-    var tail = NL + 'Total: $' + sum.toFixed(2);
-    var lines = [];
-    var skipped = 0;
-    items.forEach(function (el) {
-      var line = itemLine(el);
-      var test = head + lines.concat([line]).join(NL) + tail;
-      if (encodeURIComponent(test).length < 4000) lines.push(line); else skipped++;
-    });
-    var body = head + lines.join(NL) + (skipped ? NL + '...and ' + skipped + ' more (use the link above)' : '') + tail;
-    window.location.href = 'mailto:?subject=' + encodeURIComponent('Costco shopping list') +
-                           '&body=' + encodeURIComponent(body);
+    var text = formatChecklistText();
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        var orig = copyBtn.innerHTML;
+        copyBtn.innerHTML = '&#10003; Copied!';
+        setTimeout(function () { copyBtn.innerHTML = orig; }, 1600);
+      });
+    } else {
+      window.prompt('Copy your checklist:', text);
+    }
   });
 
   shareBtn.addEventListener('click', function () {
-    var items = listItems();
+    var items = activeBucketItems();
     if (!items.length) return;
     var url = shareUrl();
     if (navigator.share) {
-      navigator.share({ title: 'Costco shopping list', text: items.length + ' items', url: url }).catch(function () {});
+      navigator.share({ title: 'Costco Shopping List', text: formatChecklistText(), url: url }).catch(function () {});
       return;
     }
-    function fallback() { window.prompt('Copy this link:', url); }
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(url).then(function () { window.alert('Link copied.'); }, fallback);
+      navigator.clipboard.writeText(url).then(function () { window.alert('Share link copied to clipboard.'); });
     } else {
-      fallback();
+      window.prompt('Copy share link:', url);
     }
   });
 
-  listBtn.addEventListener('click', function () { state.listOnly = !state.listOnly; render(); });
-  if (newBtn) {
-    newBtn.addEventListener('click', function () { state.newOnly = !state.newOnly; render(); });
-  }
-  if (repBtn) {
-    repBtn.addEventListener('click', function () { state.hideRep = !state.hideRep; render(); });
-  }
-  saleBtn.addEventListener('click', function () { state.saleOnly = !state.saleOnly; render(); });
-  clrBtn.addEventListener('click', function () { state.clrOnly = !state.clrOnly; render(); });
-  weekBtn.addEventListener('click', function () {
-    state.weekOnly = !state.weekOnly;
-    if (state.weekOnly) state.hideWeek = false;
+  listBtn.addEventListener('click', function () {
+    state.viewMode = (state.viewMode === 'cart') ? 'all' : 'cart';
     render();
   });
-  wkHideBtn.addEventListener('click', function () {
-    state.hideWeek = !state.hideWeek;
-    if (state.hideWeek) state.weekOnly = false;
+  nextBtn.addEventListener('click', function () {
+    state.viewMode = (state.viewMode === 'next') ? 'all' : 'next';
+    render();
+  });
+  if (newBtn) newBtn.addEventListener('click', function () { state.newOnly = !state.newOnly; render(); });
+  if (atlBtn) atlBtn.addEventListener('click', function () { state.atlOnly = !state.atlOnly; render(); });
+  if (repBtn) repBtn.addEventListener('click', function () { state.hideRep = !state.hideRep; render(); });
+  saleBtn.addEventListener('click', function () { state.saleOnly = !state.saleOnly; render(); });
+  clrBtn.addEventListener('click', function () { state.clrOnly = !state.clrOnly; render(); });
+
+  weekCycleBtn.addEventListener('click', function () {
+    state.weekMode = (state.weekMode + 1) % 3;
     render();
   });
   expBtn.addEventListener('click', function () {
     state.hideExp = !state.hideExp;
     save(HIDE_EXP_KEY, state.hideExp);
+    render();
+  });
+  imgToggleBtn.addEventListener('click', function () {
+    state.noImg = !state.noImg;
+    save(NO_IMG_KEY, state.noImg);
+    render();
+  });
+  taxToggleBtn.addEventListener('click', function () {
+    state.bcTax = !state.bcTax;
+    save(TAX_KEY, state.bcTax);
+    render();
+  });
+  promoteNextBtn.addEventListener('click', function () {
+    Object.keys(savedMap).forEach(function (id) {
+      if (savedMap[id].status === 'next') {
+        savedMap[id].status = 'cart';
+        if (cardMetaMap[id]) syncCardControls(cardMetaMap[id].el, id);
+      }
+    });
+    save(STORE_KEY, savedMap);
+    state.viewMode = 'cart';
+    render();
+  });
+  clearGotBtn.addEventListener('click', function () {
+    Object.keys(savedMap).forEach(function (id) {
+      if (savedMap[id].status === 'cart' && savedMap[id].got) {
+        delete savedMap[id];
+        if (cardMetaMap[id]) syncCardControls(cardMetaMap[id].el, id);
+      }
+    });
+    save(STORE_KEY, savedMap);
     render();
   });
 
@@ -1289,7 +2061,7 @@ __CARDS__
     applySort();
     render();
   });
-  
+
   catBtns.forEach(function (btn) {
     btn.addEventListener('click', function () {
       var cat = btn.getAttribute('data-cat');
@@ -1298,18 +2070,25 @@ __CARDS__
     });
   });
 
-  q.addEventListener('input', render);
+  q.addEventListener('input', function () {
+    dbResults.hidden = true;
+    render();
+    if (q.value.trim().length >= 3 && Number(shownEl.textContent) < 3) {
+      runPastCatalogSearch();
+    }
+  });
 
   resetBtn.addEventListener('click', function () {
     q.value = '';
+    dbResults.hidden = true;
+    state.viewMode = 'all';
     state.newOnly = false;
     state.saleOnly = false;
+    state.atlOnly = false;
     state.clrOnly = false;
-    state.weekOnly = false;
-    state.hideWeek = false;
+    state.weekMode = 0;
     state.hideExp = false;
     state.hideRep = false;
-    state.listOnly = false;
     state.activeCat = '';
     state.sort = 'default';
     sortSel.value = 'default';
@@ -1319,14 +2098,17 @@ __CARDS__
   });
 
   clearBtn.addEventListener('click', function () {
-    var n = listCountOnPage();
-    if (!n) return;
-    if (!window.confirm('Remove all ' + n + ' items from your shopping list?')) return;
-    shoppingList = [];
-    save(LIST_KEY, shoppingList);
-    checks.forEach(function (chk) { chk.checked = false; });
-    state.listOnly = false;
-    state.activeCat = '';
+    var target = state.viewMode === 'next' ? 'next' : 'cart';
+    var label = target === 'next' ? 'Next Week list' : 'Cart';
+    if (!window.confirm('Clear all items from your ' + label + '?')) return;
+    Object.keys(savedMap).forEach(function (id) {
+      if (savedMap[id].status === target) {
+        delete savedMap[id];
+        if (cardMetaMap[id]) syncCardControls(cardMetaMap[id].el, id);
+      }
+    });
+    save(STORE_KEY, savedMap);
+    state.viewMode = 'all';
     render();
   });
 
@@ -1363,21 +2145,57 @@ __CARDS__
 </body>
 </html>"""
 
-def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
-                exclusive_urls=None, seen_ids=None, valid_range=None, stale=False) -> str:
+CAT_ICONS = (
+    ("groceries", "&#129382;", "Groceries"),
+    ("household", "&#129532;", "Household"),
+    ("health", "&#128138;", "Health"),
+    ("home", "&#129692;", "Home"),
+    ("appliances", "&#129368;", "Appliances"),
+    ("electronics", "&#128187;", "Electronics"),
+    ("clothing", "&#128084;", "Clothing"),
+)
+
+
+def render_html(
+    items,
+    monday_url,
+    weekend_url,
+    store_location,
+    is_weekend_mode,
+    exclusive_urls=None,
+    seen_ids=None,
+    valid_range=None,
+    stale=False,
+    price_db=None,
+) -> str:
     stamp = datetime.now(ZoneInfo("America/Vancouver")).strftime("%b %d, %I:%M %p")
     esc = html.escape
     exclusive_urls = exclusive_urls or set()
     seen_ids = seen_ids or set()
-    
-    sale_count = sum(1 for i in items if discount_pct(i.label) is not None)
-    clr_count = sum(1 for i in items if is_clearance(i.label))
+    price_db = price_db or {}
+
+    sale_count = sum(1 for i in items if i.disc_pct is not None)
+    clr_count = sum(1 for i in items if i.clearance)
     new_count = len(exclusive_urls)
-    repeat_count = sum(1 for i in items if item_ident(i) in seen_ids)
+    repeat_count = sum(1 for i in items if i.ident in seen_ids)
+    atl_ids = {i.ident for i in items if is_all_time_low(i, price_db)}
+    atl_count = len(atl_ids)
+
+    cat_counts = Counter(i.category for i in items)
+    cat_btns = []
+    for cat_key, icon, title in CAT_ICONS:
+        cnt = cat_counts.get(cat_key, 0)
+        if cnt > 0:
+            cat_btns.append(
+                f'<button class="chip" data-cat="{cat_key}" type="button" aria-pressed="false" title="{title}">{icon} {cnt}</button>'
+            )
+    cat_btns_html = "\n    ".join(cat_btns)
 
     if valid_range and stale:
-        valid_line = (f"&#9203; <b>Waiting for this week's post</b> &ndash; showing the one for "
-                      f"{fmt_range(valid_range)} (ended)<br>")
+        valid_line = (
+            f"&#9203; <b>Waiting for this week's post</b> &ndash; showing the one for "
+            f"{fmt_range(valid_range)} (ended)<br>"
+        )
     elif valid_range:
         valid_line = f"&#128197; Valid <b>{fmt_range(valid_range)}</b><br>"
     else:
@@ -1390,99 +2208,133 @@ def render_html(items, monday_url, weekend_url, store_location, is_weekend_mode,
         source_name = "Weekend Update"
     else:
         page_title = "Costco Monday Sales Post"
-        new_btn_html = ''
+        new_btn_html = ""
         source_url = monday_url
         source_name = "Monday Sales Post"
 
-    if repeat_count:
-        repeat_btn_html = (f'<button class="chip" id="rep-toggle" type="button" aria-pressed="false" '
-                           f'title="Hide items that were also on last week\'s post">'
-                           f'&#128257; Hide repeats ({repeat_count})</button>')
-    else:
-        repeat_btn_html = ''
+    atl_btn_html = (
+        f'<button class="chip" id="atl-toggle" type="button" aria-pressed="false" title="Lowest recorded price in your database">&#128293; All-Time Low ({atl_count})</button>'
+        if atl_count
+        else ""
+    )
 
+    repeat_btn_html = (
+        f'<button class="chip" id="rep-toggle" type="button" aria-pressed="false" '
+        f'title="Hide items that were also on last week\'s post">'
+        f"&#128257; Hide Repeats ({repeat_count})</button>"
+        if repeat_count
+        else ""
+    )
+
+    embedded_hist = {}
     cards = []
     for n, i in enumerate(items):
         is_new = i.url in exclusive_urls
-        clearance = is_clearance(i.label)
-        has_sale = discount_pct(i.label) is not None
-        end = parse_end_date(i.label)
-        pct = discount_pct(i.label)
-        price = price_value(i.label)
-        ident = item_ident(i)
-        is_repeat = ident in seen_ids
-        is_flyer = bool(re.search(r"costco\s*1", i.label, re.I) or (i.file_key and "costco1" in i.file_key))
+        is_atl = i.ident in atl_ids
+        is_repeat = i.ident in seen_ids
+
+        if i.ident in price_db and price_db[i.ident].get("history"):
+            embedded_hist[i.ident] = price_db[i.ident]["history"]
 
         classes = ["card"]
         if is_new:
             classes.append("is-new")
-        if clearance:
+        if i.clearance:
             classes.append("is-clr")
-        if has_sale:
+        if i.disc_pct is not None:
             classes.append("is-sale")
+        if is_atl:
+            classes.append("is-atl")
         class_str = " ".join(classes)
 
-        attrs = (f'data-t="{esc(i.label.lower(), quote=True)}" '
-                 f'data-name="{esc(i.label, quote=True)}" '
-                 f'data-url="{esc(i.url, quote=True)}" '
-                 f'data-ident="{esc(ident, quote=True)}" '
-                 f'data-sku="{esc(i.item_no or "")}" '
-                 f'data-cat="{esc(i.category, quote=True)}" '
-                 f'data-idx="{n}"')
-        if is_flyer:
+        attrs = (
+            f'data-t="{esc((i.label + " " + (i.item_no or "")).lower(), quote=True)}" '
+            f'data-name="{esc(i.label, quote=True)}" '
+            f'data-url="{esc(i.url, quote=True)}" '
+            f'data-ident="{esc(i.ident, quote=True)}" '
+            f'data-sku="{esc(i.item_no or "")}" '
+            f'data-cat="{esc(i.category, quote=True)}" '
+            f'data-idx="{n}"'
+        )
+        if i.is_flyer:
             attrs += ' data-flyer="1"'
-        if end:
-            attrs += f' data-end="{end}"'
-        if price is not None:
-            attrs += f' data-price="{price:.2f}"'
-        if pct:
-            attrs += f' data-disc="{pct}"'
+        if i.end_date:
+            attrs += f' data-end="{i.end_date}"'
+        if i.price is not None:
+            attrs += f' data-price="{i.price:.2f}"'
+        if i.disc_pct:
+            attrs += f' data-disc="{i.disc_pct}"'
         if is_repeat:
             attrs += ' data-seen="1"'
 
-        new_tag = '<div class="new-tag">&#10024; New</div>' if is_new else ''
-        disc_tag = f'<div class="disc-tag">-{pct}%</div>' if pct else ''
-        clr_tag = '<div class="clr-tag">&#127991;&#65039; Clearance</div>' if clearance else ''
-        right_tags = f'<div class="tags-right">{disc_tag}{clr_tag}</div>' if (pct or clearance) else ''
-        end_badge = '<span class="end-badge" hidden></span>' if end else ''
-        repeat_tag = ('<span class="repeat-tag" title="Also on last week\'s post">&#128257; Repeat</span>'
-                      if is_repeat else '')
-        sku_badge = f'<span class="sku-badge" title="View SKU history">#{esc(i.item_no)}</span>' if i.item_no else ''
+        new_tag = '<div class="new-tag">&#10024; New</div>' if is_new else ""
+        disc_tag = f'<div class="disc-tag">-{i.disc_pct}%</div>' if i.disc_pct else ""
+        atl_tag = '<div class="atl-tag">&#128293; Low</div>' if is_atl else ""
+        clr_tag = (
+            '<div class="clr-tag">&#127991;&#65039; .97</div>' if i.clearance else ""
+        )
+        right_tags = (
+            f'<div class="tags-right">{disc_tag}{atl_tag}{clr_tag}</div>'
+            if (i.disc_pct or is_atl or i.clearance)
+            else ""
+        )
+        end_badge = '<span class="end-badge" hidden></span>' if i.end_date else ""
+        repeat_tag = (
+            '<span class="repeat-tag" title="Also on last week\'s post">&#128257;</span>'
+            if is_repeat
+            else ""
+        )
+        sku_badge = (
+            f'<span class="sku-badge" title="View SKU history">#{esc(i.item_no)}</span>'
+            if i.item_no
+            else ""
+        )
         foot_right = f'<span class="foot-right">{sku_badge}{repeat_tag}{end_badge}</span>'
 
-        cards.append(f'''<figure class="{class_str}" {attrs}>
+        cards.append(
+            f'''<figure class="{class_str}" {attrs}>
   {new_tag}{right_tags}
   <a href="{esc(i.url, quote=True)}" target="_blank" rel="noopener">
     <img src="{esc(i.url, quote=True)}" alt="{esc(i.label, quote=True)}" loading="lazy" referrerpolicy="no-referrer">
   </a>
   <figcaption title="Click to view SKU price history">{esc(i.label)}</figcaption>
   <div class="card-footer">
-    <label class="shop-label">
-      <input type="checkbox" class="shop-check" data-url="{esc(i.url, quote=True)}"> Add to list
-    </label>
+    <div class="card-actions">
+      <label class="shop-label">
+        <input type="checkbox" class="shop-check" data-ident="{esc(i.ident, quote=True)}"> Cart
+      </label>
+      <button type="button" class="mini-btn next-item-btn" data-ident="{esc(i.ident, quote=True)}" title="Save for next week">&#128204; Next</button>
+      <button type="button" class="mini-btn qty-btn" data-ident="{esc(i.ident, quote=True)}" title="Tap to change quantity" hidden>&times;1</button>
+      <button type="button" class="mini-btn got-btn" data-ident="{esc(i.ident, quote=True)}" title="Mark as in your physical cart" hidden>&#10003;</button>
+    </div>
     {foot_right}
   </div>
-</figure>''')
+</figure>'''
+        )
 
     cards_html = "\n".join(cards) or '<p class="empty">No items found.</p>'
 
-    return (PAGE_TEMPLATE
-            .replace("__PAGE_TITLE__", page_title)
-            .replace("__TOTAL__", str(len(items)))
-            .replace("__SALE_COUNT__", str(sale_count))
-            .replace("__CLR_COUNT__", str(clr_count))
-            .replace("__NEW_BTN__", new_btn_html)
-            .replace("__REPEAT_BTN__", repeat_btn_html)
-            .replace("__LOCATION__", esc(store_location or "Metro Vancouver Area"))
-            .replace("__VALID_LINE__", valid_line)
-            .replace("__STAMP__", stamp)
-            .replace("__SOURCE_URL__", esc(source_url, quote=True))
-            .replace("__SOURCE_NAME__", source_name)
-            .replace("__CARDS__", cards_html))
+    return (
+        PAGE_TEMPLATE.replace("__PAGE_TITLE__", page_title)
+        .replace("__TOTAL__", str(len(items)))
+        .replace("__SALE_COUNT__", str(sale_count))
+        .replace("__CLR_COUNT__", str(clr_count))
+        .replace("__NEW_BTN__", new_btn_html)
+        .replace("__ATL_BTN__", atl_btn_html)
+        .replace("__REPEAT_BTN__", repeat_btn_html)
+        .replace("__CAT_BTNS__", cat_btns_html)
+        .replace("__LOCATION__", esc(store_location or "Metro Vancouver Area"))
+        .replace("__VALID_LINE__", valid_line)
+        .replace("__STAMP__", stamp)
+        .replace("__SOURCE_URL__", esc(source_url, quote=True))
+        .replace("__SOURCE_NAME__", source_name)
+        .replace("__EMBEDDED_HIST__", json.dumps(embedded_hist, separators=(",", ":")))
+        .replace("__CARDS__", cards_html)
+    )
+
 
 def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     scraper = make_scraper()
 
     today = datetime.now(ZoneInfo("America/Vancouver")).date()
@@ -1499,15 +2351,21 @@ def main() -> int:
 
     print(f"Base Flyer/Sales Post: {monday_url}")
     monday_html = fetch(scraper, monday_url)
-    monday_range = reconcile_range(ranges.get("monday") or range_from_html(monday_html),
-                                   published_date_from_html(monday_html))
-    monday_items = extract_items(monday_html, monday_url)
+    monday_soup = BeautifulSoup(monday_html, "html.parser")
+    monday_range = reconcile_range(
+        ranges.get("monday") or range_from_soup(monday_soup),
+        published_date_from_soup(monday_soup),
+    )
+    monday_items = extract_items_from_soup(monday_soup, monday_url)
 
     if not monday_items:
-        print("ERROR: zero images extracted from base sales post; refusing to deploy.", file=sys.stderr)
+        print(
+            "ERROR: zero images extracted from base sales post; refusing to deploy.",
+            file=sys.stderr,
+        )
         return 1
 
-    store_location = extract_location(monday_html)
+    store_location = extract_location_from_soup(monday_soup, monday_html)
 
     weekend_range = ranges.get("weekend")
     is_weekend_mode = bool(weekend_url)
@@ -1519,17 +2377,24 @@ def main() -> int:
         print(f"Weekend Update: {weekend_url}")
         time.sleep(random.uniform(1, 3))
         weekend_html = fetch(scraper, weekend_url)
-        weekend_range = reconcile_range(weekend_range or range_from_html(weekend_html),
-                                        published_date_from_html(weekend_html))
+        weekend_soup = BeautifulSoup(weekend_html, "html.parser")
+        weekend_range = reconcile_range(
+            weekend_range or range_from_soup(weekend_soup),
+            published_date_from_soup(weekend_soup),
+        )
         if weekend_over(weekend_range, weekend_forced, today, monday_range):
-            print(f"Weekend post ended {weekend_range[1]}; using the Monday post instead.")
+            print(
+                f"Weekend post ended {weekend_range[1]}; using the Monday post instead."
+            )
             weekend_items = []
         else:
-            weekend_items = extract_items(weekend_html, weekend_url)
-        
+            weekend_items = extract_items_from_soup(weekend_soup, weekend_url)
+
         if weekend_items:
-            store_location = extract_location(weekend_html) or store_location
-            exclusive = find_exclusive_userscript(weekend_items, monday_items) if MATCH_MODE == "userscript" else find_exclusive(weekend_items, monday_items)
+            store_location = (
+                extract_location_from_soup(weekend_soup, weekend_html) or store_location
+            )
+            exclusive = find_exclusive(weekend_items, monday_items)
             exclusive_urls = {i.url for i in exclusive}
         else:
             is_weekend_mode = False
@@ -1543,34 +2408,48 @@ def main() -> int:
     prev_state, state_ok = load_previous_state(scraper)
 
     seen_ids = previous_ids(prev_state, mode, target_url)
-    ids = sorted({item_ident(i) for i in target_items})
+    ids = sorted({i.ident for i in target_items})
     history = build_history(prev_state, mode, target_url, ids)
     price_db = update_price_db(prev_state, target_items, valid_range)
 
-    html_content = render_html(target_items, monday_url, weekend_url or monday_url, store_location,
-                               is_weekend_mode, exclusive_urls, seen_ids, valid_range, stale)
+    html_content = render_html(
+        target_items,
+        monday_url,
+        weekend_url or monday_url,
+        store_location,
+        is_weekend_mode,
+        exclusive_urls,
+        seen_ids,
+        valid_range,
+        stale,
+        price_db,
+    )
 
     (OUTPUT_DIR / "index.html").write_text(html_content, encoding="utf-8")
 
-    slug = Path(urlparse(target_url).path).stem or "latest"
-    post_archive_dir = ARCHIVE_DIR / slug
-    post_archive_dir.mkdir(parents=True, exist_ok=True)
-    (post_archive_dir / "index.html").write_text(html_content, encoding="utf-8")
-    
-    (OUTPUT_DIR / "state.json").write_text(json.dumps({
-        "weekend_url": weekend_url if is_weekend_mode else None,
-        "flyer_url": monday_url,
-        "mode": mode,
-        "valid": [valid_range[0].isoformat(), valid_range[1].isoformat()] if valid_range else None,
-        "total_count": len(target_items),
-        "exclusive_count": len(exclusive),
-        "updated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "history": history,
-        "price_db": price_db,
-    }, indent=2), encoding="utf-8")
+    (OUTPUT_DIR / "state.json").write_text(
+        json.dumps(
+            {
+                "weekend_url": weekend_url if is_weekend_mode else None,
+                "flyer_url": monday_url,
+                "mode": mode,
+                "valid": [valid_range[0].isoformat(), valid_range[1].isoformat()]
+                if valid_range
+                else None,
+                "total_count": len(target_items),
+                "exclusive_count": len(exclusive),
+                "updated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "history": history,
+                "price_db": price_db,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, target_items, exclusive)
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
