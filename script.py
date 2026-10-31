@@ -1040,7 +1040,7 @@ PAGE_TEMPLATE = """<!doctype html>
   .grid.c1 { grid-template-columns:minmax(0,1fr); }
   .grid.c2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
 
-  /* Compact No-Image Checklist Mode: Stacked layout with description on its own line above buttons */
+  /* Compact No-Image Checklist Mode */
   .grid.no-img { grid-template-columns:minmax(0,1fr) !important; gap:.4rem; }
   .grid.no-img .card { flex-direction:column; align-items:stretch; padding:.3rem 0; border-radius:10px; }
   .grid.no-img .card > a, .grid.no-img .new-tag, .grid.no-img .tags-right { display:none !important; }
@@ -1055,12 +1055,12 @@ PAGE_TEMPLATE = """<!doctype html>
   .card.is-got figcaption { text-decoration:line-through; opacity:.55; }
   .card.is-got img { opacity:.45; filter:grayscale(80%); }
 
-  .card a { display:block; }
+  .card a { display:block; width:100%; }
   .card img { width:100%; aspect-ratio:1/1; object-fit:contain; display:block; background:#fff; }
-  .card figcaption { padding:.5rem .6rem; font-size:.84rem; line-height:1.3; flex-grow:1; overflow-wrap:anywhere; cursor:pointer; }
+  .card figcaption { padding:.5rem .6rem; font-size:.84rem; line-height:1.3; width:100%; overflow-wrap:anywhere; cursor:pointer; flex-grow:1; }
   .card-footer { padding:.4rem .6rem .55rem; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.3rem;
-                 border-top:1px solid var(--line); font-size:.78rem; }
-                 
+                 border-top:1px solid var(--line); font-size:.78rem; width:100%; }
+
   .card-actions { display:flex; align-items:center; gap:.3rem; flex-wrap:wrap; }
   .shop-label { display:inline-flex; align-items:center; gap:.3rem; cursor:pointer; font-weight:600; }
   .shop-label input { width:1.05rem; height:1.05rem; accent-color:var(--accent); cursor:pointer; margin:0; }
@@ -2274,7 +2274,7 @@ def render_html(
         .replace("__STAMP__", stamp)
         .replace("__SOURCE_URL__", esc(source_url, quote=True))
         .replace("__SOURCE_NAME__", source_name)
-        .replace("__EMBEDDED_HIST__", json.dumps(embedded_hist, separators=(",", ":")))
+        .replace("__EMBEDD_HIST__", json.dumps(embedded_hist, separators=(",", ":")))
         .replace("__CARDS__", cards_html)
     )
 
