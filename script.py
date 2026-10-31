@@ -1040,13 +1040,14 @@ PAGE_TEMPLATE = """<!doctype html>
   .grid.c1 { grid-template-columns:minmax(0,1fr); }
   .grid.c2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
 
-  /* Compact No-Image Checklist Mode: Description fills full width on a separate line above buttons */
-  .grid.no-img { grid-template-columns:minmax(0,1fr) !important; gap:.5rem; }
-  .grid.no-img .card { flex-direction:column; align-items:stretch; padding:.2rem 0; border-radius:10px; }
+  /* Compact No-Image Checklist Mode: Stacked layout with description on its own line above buttons */
+  .grid.no-img { grid-template-columns:minmax(0,1fr) !important; gap:.4rem; }
+  .grid.no-img .card { flex-direction:column; align-items:stretch; padding:.3rem 0; border-radius:10px; }
   .grid.no-img .card > a, .grid.no-img .new-tag, .grid.no-img .tags-right { display:none !important; }
-  .grid.no-img .card figcaption { padding:.6rem .8rem .2rem; font-size:.9rem; font-weight:600; }
-  .grid.no-img .card-footer { border-top:1px solid var(--line); padding:.4rem .8rem .6rem; background:rgba(0,0,0,.02); }
+  .grid.no-img .card figcaption { padding:.5rem .8rem .2rem; font-size:.88rem; font-weight:600; width:100%; }
+  .grid.no-img .card-footer { border-top:1px solid var(--line); padding:.4rem .8rem .5rem; background:rgba(0,0,0,.02); width:100%; }
 
+  /* Normal Grid Cards */
   .card { margin:0; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; position:relative;
           display:flex; flex-direction:column; justify-content:space-between; }
   .card.is-new { border:2px solid var(--highlight-border); background:var(--highlight); }
@@ -1054,10 +1055,11 @@ PAGE_TEMPLATE = """<!doctype html>
   .card.is-got figcaption { text-decoration:line-through; opacity:.55; }
   .card.is-got img { opacity:.45; filter:grayscale(80%); }
 
-  .card > a { display:block; order: 1; }
-  .card figcaption { padding:.6rem .8rem; font-size:.86rem; line-height:1.35; width:100%; overflow-wrap:anywhere; cursor:pointer; order: 2; }
-  .card-footer { padding:.5rem .8rem .6rem; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.4rem;
-                 border-top:1px solid var(--line); font-size:.78rem; order: 3; width:100%; }
+  .card a { display:block; }
+  .card img { width:100%; aspect-ratio:1/1; object-fit:contain; display:block; background:#fff; }
+  .card figcaption { padding:.5rem .6rem; font-size:.84rem; line-height:1.3; flex-grow:1; overflow-wrap:anywhere; cursor:pointer; }
+  .card-footer { padding:.4rem .6rem .55rem; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.3rem;
+                 border-top:1px solid var(--line); font-size:.78rem; }
                  
   .card-actions { display:flex; align-items:center; gap:.3rem; flex-wrap:wrap; }
   .shop-label { display:inline-flex; align-items:center; gap:.3rem; cursor:pointer; font-weight:600; }
