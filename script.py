@@ -1366,13 +1366,16 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
       ? '<a href="' + item.url + '" target="_blank" rel="noopener"><img src="' + item.url + '" alt="" loading="lazy" referrerpolicy="no-referrer"></a>'
       : '';
     var skuPart = item.sku ? '<span class="sku-badge">#' + item.sku + '</span>' : '';
-    var pTxt = (item.price !== null && item.price !== undefined && (item.name || '').indexOf('$') === -1)
+    
+    // Ensure name and price display nicely in captions and compact rows
+    var displayName = item.name || id;
+    var pTxt = (item.price !== null && item.price !== undefined && displayName.indexOf('$') === -1)
       ? ' ($' + Number(item.price).toFixed(2) + ')'
       : '';
 
     fig.innerHTML =
       tagHtml + imgPart +
-      '<figcaption>' + (item.name || id) + pTxt + '</figcaption>' +
+      '<figcaption>' + displayName + pTxt + '</figcaption>' +
       '<div class="card-footer">' +
         '<div class="card-actions">' +
           '<label class="shop-label"><input type="checkbox" class="shop-check" data-ident="' + id + '"> Cart</label>' +
@@ -1702,29 +1705,33 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
     var term = q.value.trim().toLowerCase();
     if (term.length < 2) return;
     dbResults.hidden = false;
-    dbResults.innerHTML = '<h4>Searching historical CocoWest catalog...</h4>';
+    dbResults.innerHTML = '<h4>Searching local catalog & price database...</h4>';
 
     fetchFullPriceDb(function (db) {
       var matches = [];
       Object.keys(db).forEach(function (id) {
-        if (cardMetaMap[id] && !cardMetaMap[id].isCarry) return;
         var entry = db[id];
-        var hay = ((entry.name || '') + ' ' + (entry.item_no || '')).toLowerCase();
+        var hay = ((entry.name || '') + ' ' + (entry.item_no || '') + ' ' + (entry.cat || '')).toLowerCase();
         if (hay.indexOf(term) !== -1) {
           matches.push({ id: id, entry: entry });
         }
       });
 
-      var html = '<h4>Past CocoWest Catalog Matches (' + matches.length + ')</h4>';
-      matches.slice(0, 15).forEach(function (m) {
+      if (!matches.length) {
+        dbResults.innerHTML = '<h4>No matches found in your database for "' + term + '". Use "+ Add to Cart" above for a custom entry!</h4>';
+        return;
+      }
+
+      var html = '<h4>Catalog & Price Database Matches (' + matches.length + ')</h4>';
+      matches.slice(0, 20).forEach(function (m) {
         var e = m.entry;
         var lastHist = e.history && e.history.length ? e.history[e.history.length - 1] : null;
-        var lastPrice = lastHist ? lastHist.price : null;
-        var priceTxt = lastPrice !== null ? '$' + Number(lastPrice).toFixed(2) + ' (last seen ' + lastHist.date + ')' : 'No price recorded';
+        var lastPrice = lastHist ? lastHist.price : (e.price !== undefined ? e.price : null);
+        var priceTxt = lastPrice !== null ? '$' + Number(lastPrice).toFixed(2) + (lastHist ? ' (seen ' + lastHist.date + ')' : '') : 'No price recorded';
         var imgTag = e.url ? '<img src="' + e.url + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : '';
         html += '<div class="db-row" data-dbid="' + m.id + '">' +
                   '<div style="display:flex;align-items:center;gap:.55rem;min-width:0;">' + imgTag +
-                    '<div style="overflow:hidden;text-overflow:ellipsis;"><b>' + (e.name || m.id) + '</b><br><span style="color:var(--muted);">' + priceTxt + '</span></div>' +
+                    '<div style="overflow:hidden;text-overflow:ellipsis;"><b>' + (e.name || m.id) + '</b><br><span style="color:var(--muted);">' + priceTxt + ' &middot; <span style="text-transform:capitalize;">' + (e.cat || 'other') + '</span></span></div>' +
                   '</div>' +
                   '<div style="display:flex;gap:.3rem;flex-shrink:0;">' +
                     '<button type="button" class="chip active db-add-cart" data-id="' + m.id + '">+ Cart</button>' +
@@ -1732,80 +1739,31 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
                   '</div>' +
                 '</div>';
       });
-      html += '<div style="margin-top:.65rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">' +
-                '<button type="button" class="chip" id="live-wp-search">&#127760; Search CocoWest.ca Live Media API</button>' +
-                '<span id="live-wp-status" style="font-size:.78rem;color:var(--muted);"></span>' +
-              '</div>';
       dbResults.innerHTML = html;
 
-      function bindDbBtns(container) {
-        Array.prototype.slice.call(container.querySelectorAll('.db-add-cart, .db-add-next')).forEach(function (btn) {
-          btn.addEventListener('click', function () {
-            var id = btn.getAttribute('data-id');
-            var target = btn.classList.contains('db-add-next') ? 'next' : 'cart';
-            var e = db[id];
-            if (!e) return;
-            var lastH = e.history && e.history.length ? e.history[e.history.length - 1] : null;
-            addOrUpdateItem(id, {
-              status: target, qty: 1, got: false,
-              name: e.name || id, url: e.url || '', sku: e.item_no || '',
-              cat: e.cat || 'other', price: lastH ? lastH.price : null, disc: null, end: '', custom: false
-            });
-            btn.textContent = 'Added!';
+      // Bind add buttons
+      Array.prototype.slice.call(dbResults.querySelectorAll('.db-add-cart, .db-add-next')).forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var id = btn.getAttribute('data-id');
+          var target = btn.classList.contains('db-add-next') ? 'next' : 'cart';
+          var e = db[id];
+          if (!e) return;
+          var lastH = e.history && e.history.length ? e.history[e.history.length - 1] : null;
+          var pVal = lastH ? lastH.price : (e.price !== undefined ? e.price : null);
+          addOrUpdateItem(id, {
+            status: target, qty: 1, got: false,
+            name: e.name || id, url: e.url || '', sku: e.item_no || '',
+            cat: e.cat || 'other', price: pVal, disc: null, end: '', custom: false
           });
+          btn.textContent = 'Added!';
         });
-      }
-      bindDbBtns(dbResults);
-
-      var liveBtn = document.getElementById('live-wp-search');
-      var liveStatus = document.getElementById('live-wp-status');
-      if (liveBtn) {
-        liveBtn.addEventListener('click', function () {
-          liveStatus.textContent = 'Querying CocoWest WordPress API...';
-          var wpUrl = 'https://www.cocowest.ca/wp-json/wp/v2/media?search=' + encodeURIComponent(term) + '&per_page=10';
-          var proxyUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(wpUrl);
-          fetch(proxyUrl).then(function (r) { return r.json(); }).then(function (arr) {
-            if (!Array.isArray(arr) || !arr.length) {
-              liveStatus.textContent = 'No live media found on CocoWest.';
-              return;
-            }
-            liveStatus.textContent = 'Found ' + arr.length + ' live items:';
-            arr.forEach(function (media) {
-              var title = (media.title && media.title.rendered) ? media.title.rendered.replace(/<[^>]+>/g, '') : '';
-              var alt = media.alt_text || title || 'CocoWest Item';
-              var src = media.source_url || '';
-              var skuMatch = /^\s*(\d{5,8})\b/.exec(alt);
-              var sku = skuMatch ? skuMatch[1] : '';
-              var id = sku ? ('no:' + sku) : ('wp:' + media.id);
-              var pMatch = /\$\s*(\d[\d,]*\.\d{2})\b/.exec(alt);
-              var pVal = pMatch ? parseFloat(pMatch[1].replace(',', '')) : null;
-              db[id] = {
-                name: alt, item_no: sku, url: src, cat: 'other',
-                history: pVal !== null ? [{ date: 'Live', price: pVal }] : []
-              };
-              var row = document.createElement('div');
-              row.className = 'db-row';
-              row.innerHTML =
-                '<div style="display:flex;align-items:center;gap:.55rem;min-width:0;">' +
-                  (src ? '<img src="' + src + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : '') +
-                  '<div><b>' + alt + '</b><br><span style="color:var(--muted);">Live CocoWest Result</span></div>' +
-                '</div>' +
-                '<div style="display:flex;gap:.3rem;flex-shrink:0;">' +
-                  '<button type="button" class="chip active db-add-cart" data-id="' + id + '">+ Cart</button>' +
-                  '<button type="button" class="chip next-active db-add-next" data-id="' + id + '">&#128204; Next</button>' +
-                '</div>';
-              dbResults.appendChild(row);
-              bindDbBtns(row);
-            });
-          }).catch(function () {
-            liveStatus.textContent = 'Live search blocked by Cloudflare; use + Add to Cart above for manual entry.';
-          });
-        });
-      }
+      });
     });
   }
 
-  searchHistBtn.addEventListener('click', runPastCatalogSearch);
+  if (searchHistBtn) {
+    searchHistBtn.addEventListener('click', runPastCatalogSearch);
+  }
 
   function render() {
     var t = q.value.trim().toLowerCase();
