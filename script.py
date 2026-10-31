@@ -1040,12 +1040,12 @@ PAGE_TEMPLATE = """<!doctype html>
   .grid.c1 { grid-template-columns:minmax(0,1fr); }
   .grid.c2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
 
-  /* Compact No-Image Checklist Mode */
-  .grid.no-img { grid-template-columns:minmax(0,1fr) !important; gap:.35rem; }
-  .grid.no-img .card { flex-direction:row; align-items:center; padding:.4rem .65rem; border-radius:8px; min-height:auto; }
+  /* Compact No-Image Checklist Mode: Description fills full width on a separate line above buttons */
+  .grid.no-img { grid-template-columns:minmax(0,1fr) !important; gap:.5rem; }
+  .grid.no-img .card { flex-direction:column; align-items:stretch; padding:.2rem 0; border-radius:10px; }
   .grid.no-img .card > a, .grid.no-img .new-tag, .grid.no-img .tags-right { display:none !important; }
-  .grid.no-img .card figcaption { padding:0 .6rem 0 0; font-size:.85rem; }
-  .grid.no-img .card-footer { border-top:none; padding:0; flex-shrink:0; gap:.45rem; }
+  .grid.no-img .card figcaption { padding:.6rem .8rem .2rem; font-size:.9rem; font-weight:600; }
+  .grid.no-img .card-footer { border-top:1px solid var(--line); padding:.4rem .8rem .6rem; background:rgba(0,0,0,.02); }
 
   .card { margin:0; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; position:relative;
           display:flex; flex-direction:column; justify-content:space-between; }
@@ -1054,25 +1054,11 @@ PAGE_TEMPLATE = """<!doctype html>
   .card.is-got figcaption { text-decoration:line-through; opacity:.55; }
   .card.is-got img { opacity:.45; filter:grayscale(80%); }
 
-  .new-tag { position:absolute; top:8px; left:8px; background:#28a745; color:#fff; font-size:.68rem; font-weight:bold; padding:2px 6px;
-             border-radius:4px; z-index:2; text-transform:uppercase; }
-  .new-tag.carry { background:#0d6efd; }
-  .new-tag.custom { background:#6f42c1; }
-
-  .tags-right { position:absolute; top:8px; right:8px; z-index:2; display:flex; flex-direction:column; align-items:flex-end;
-                gap:4px; pointer-events:none; }
-  .disc-tag { background:#d93025; color:#fff; font-size:.78rem; font-weight:800; padding:2px 7px; border-radius:4px;
-              box-shadow:0 1px 3px rgba(0,0,0,.35); }
-  .atl-tag { background:#ff6d00; color:#fff; font-size:.68rem; font-weight:800; padding:2px 6px; border-radius:4px;
-             text-transform:uppercase; box-shadow:0 1px 3px rgba(0,0,0,.35); }
-  .clr-tag { background:#6f42c1; color:#fff; font-size:.68rem; font-weight:bold; padding:2px 6px; border-radius:4px;
-             text-transform:uppercase; }
-
-  .card a { display:block; }
-  .card img { width:100%; aspect-ratio:1/1; object-fit:contain; display:block; background:#fff; }
-  .card figcaption { padding:.5rem .6rem; font-size:.84rem; line-height:1.3; flex-grow:1; overflow-wrap:anywhere; cursor:pointer; }
-  .card-footer { padding:.4rem .6rem .55rem; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.3rem;
-                 border-top:1px solid var(--line); font-size:.78rem; }
+  .card > a { display:block; order: 1; }
+  .card figcaption { padding:.6rem .8rem; font-size:.86rem; line-height:1.35; width:100%; overflow-wrap:anywhere; cursor:pointer; order: 2; }
+  .card-footer { padding:.5rem .8rem .6rem; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.4rem;
+                 border-top:1px solid var(--line); font-size:.78rem; order: 3; width:100%; }
+                 
   .card-actions { display:flex; align-items:center; gap:.3rem; flex-wrap:wrap; }
   .shop-label { display:inline-flex; align-items:center; gap:.3rem; cursor:pointer; font-weight:600; }
   .shop-label input { width:1.05rem; height:1.05rem; accent-color:var(--accent); cursor:pointer; margin:0; }
