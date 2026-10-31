@@ -375,7 +375,7 @@ CATEGORY_RULES = {
         r"vegetable|salad|lettuce|spinach|kale|arugula|coleslaw|broccoli|cauliflower|asparagus|brussels|celery|carrot|cucumber|zucchini|pepper|mushroom|onion|garlic|potato|sweet\s*potato|fries|hash\s*brown|tater|corn|peas|edamame|tofu|tempeh|kimchi|sauerkraut|pickle|olive|caper|"
         r"pizza|dumpling|gyoza|wonton|potsticker|spring\s*roll|egg\s*roll|samosa|spanakopita|quiche|burrito|taquito|empanada|perogy|pierogi|poutine|"
         r"ice\s*cream|gelato|sorbet|popsicle|haagen|magnum|drumstick|frozen\s*yogurt|"
-        r"soda|coke|coca-?cola|pepsi|sprite|7up|ginger\s*ale|root\s*beer|dr\s*pepper|canada\s*dry|bubly|perrier|san\s*pellegrino|sparkling\s*water|spring\s*water|coconut\s*water|red\s*bull|monster|celsius|alani|gatorade|powerade|prime|torani|wine|beer|spirits|liquor|vodka|whisky|gin|rum|tequila|prosecco|champagne)\b",
+        r"soda|coke|coca-?cola|pepsi|sprite|7up|ginger\s*ale|root\s*beer|dr\s*pepper|canada\s*dry|bubly|perrier|san\s*pellegrino|sparkling\s*water|spring\s*water|coconut\s*water|red\s*bull|monster|celsius|alani|gatorade|powerade|prime|torani|wine|beer|spirits|liquor|vodka|whisky|gin|rum|tequila|prosecco|champagne)s?\b",
         re.I,
     ),
     "appliances": re.compile(
@@ -1014,6 +1014,8 @@ PAGE_TEMPLATE = r"""<!doctype html>
                align-items:center; justify-content:space-between; gap:.4rem; font-size:.8rem; }
   .quick-add-actions { display:flex; gap:.35rem; flex-wrap:wrap; }
 
+  .toolbar-row { max-width:1200px; margin:0 auto; padding:.1rem .8rem .45rem; display:flex; align-items:center; gap:.4rem; }
+  .filters-panel { border-top:1px solid var(--line); max-height:42vh; overflow-y:auto; }
   .toolbar { max-width:1200px; margin:0 auto; padding:.35rem .8rem .5rem; display:flex; flex-wrap:wrap; align-items:center; gap:.32rem; }
   .chip { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:999px; padding:.24rem .6rem;
           font-size:.78rem; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; gap:.22rem; white-space:nowrap; }
@@ -1028,7 +1030,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
   .seg button { border:none; background:var(--card); color:var(--fg); padding:.25rem .65rem; font-size:.8rem; font-weight:700; cursor:pointer; }
   .seg button.active { background:var(--accent); color:var(--on-accent); }
 
-  .list-bar { max-width:1200px; margin:0 auto; padding:0 .8rem .55rem; display:flex; flex-wrap:wrap; align-items:center; gap:.35rem; }
+  .list-bar { max-width:1200px; margin:0 auto; padding:.55rem .8rem .2rem; display:flex; flex-wrap:wrap; align-items:center; gap:.35rem; }
   .list-sum { font-size:.82rem; font-weight:700; margin-right:auto; }
 
   .meta { max-width:1200px; margin:.5rem auto .35rem; padding:0 .8rem; color:var(--muted); font-size:.78rem; line-height:1.45; }
@@ -1059,6 +1061,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
              padding:2px 8px; border-radius:999px; box-shadow:0 1px 4px rgba(0,0,0,.4); white-space:nowrap; }
   .new-tag.carry { background:#0d6efd; }
   .new-tag.custom { background:#6f42c1; }
+  .card.is-carryover .new-tag { position:static; align-self:flex-start; margin:.55rem 0 0 .7rem; }
   .tags-right { top:8px; right:8px; display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
   .disc-tag, .atl-tag, .clr-tag { color:#fff; font-size:.74rem; font-weight:800; line-height:1.3; padding:2px 8px;
                                   border-radius:999px; box-shadow:0 1px 4px rgba(0,0,0,.4); white-space:nowrap; }
@@ -1111,7 +1114,8 @@ PAGE_TEMPLATE = r"""<!doctype html>
   @media (max-width:640px) {
     .cols-toggle { display:flex; }
     .toolbar { padding:.25rem .6rem .45rem; gap:.24rem; }
-    .list-bar { padding:0 .6rem .45rem; gap:.28rem; }
+    .toolbar-row { padding:.1rem .6rem .4rem; }
+    .list-bar { padding:.45rem .6rem .15rem; gap:.28rem; }
     .chip { font-size:.71rem; padding:.2rem .48rem; }
     .sort-select { font-size:.71rem; padding:.2rem .4rem; }
     .grid { padding:0 .5rem; gap:.5rem; }
@@ -1148,15 +1152,8 @@ PAGE_TEMPLATE = r"""<!doctype html>
       </div>
     </div>
   </header>
-  <div class="toolbar">
-    __NEW_BTN__
-    <button class="chip" id="sale-toggle" type="button" aria-pressed="false">&#128293; Sale (__SALE_COUNT__)</button>
-    __ATL_BTN__
-    <button class="chip" id="clr-toggle" type="button" aria-pressed="false">&#127991;&#65039; .97 (__CLR_COUNT__)</button>
-    <button class="chip" id="week-cycle" type="button" title="Cycle: All -> Ends this week -> Hide ending this week">&#9200; Ends This Wk (0)</button>
-    <button class="chip" id="exp-toggle" type="button" aria-pressed="false" hidden>&#128584; Hide Expired (0)</button>
-    __REPEAT_BTN__
-    __CAT_BTNS__
+  <div class="toolbar-row">
+    <button class="chip" id="filters-toggle" type="button" aria-expanded="false" aria-controls="filters-panel">&#9776; Filters<span id="filters-count"></span></button>
     <select class="sort-select" id="sort" aria-label="Sort items">
       <option value="default">Sort: Default</option>
       <option value="disc">Biggest discount</option>
@@ -1174,17 +1171,27 @@ PAGE_TEMPLATE = r"""<!doctype html>
       </span>
     </div>
   </div>
+  <div class="toolbar filters-panel" id="filters-panel" hidden>
+    __NEW_BTN__
+    <button class="chip" id="sale-toggle" type="button" aria-pressed="false">&#128293; Sale (__SALE_COUNT__)</button>
+    __ATL_BTN__
+    <button class="chip" id="clr-toggle" type="button" aria-pressed="false">&#127991;&#65039; .97 (__CLR_COUNT__)</button>
+    <button class="chip" id="week-cycle" type="button" title="Cycle: All -> Ends this week -> Hide ending this week">&#9200; Ends This Wk (0)</button>
+    <button class="chip" id="exp-toggle" type="button" aria-pressed="false" hidden>&#128584; Hide Expired (0)</button>
+    __REPEAT_BTN__
+    __CAT_BTNS__
+  </div>
+</div>
   <div class="list-bar" id="list-bar" hidden>
     <span class="list-sum" id="list-sum"></span>
     <button class="chip" id="img-toggle" type="button" title="Toggle compact text checklist mode">&#128444;&#65039; Compact Rows</button>
-    <button class="chip" id="tax-toggle" type="button" title="Estimate BC GST/PST by category">+ BC Tax</button>
+    <button class="chip" id="tax-toggle" type="button" title="Rough BC GST/PST estimate (basic groceries 0%)">+ BC Tax</button>
     <button class="chip" id="promote-next" type="button" hidden>&#128722; Move All to Cart</button>
     <button class="chip" id="clear-got" type="button" hidden>&#10003; Clear Got-It</button>
     <button class="chip" id="copy-list" type="button">&#128203; Copy</button>
     <button class="chip" id="share-list" type="button">&#128279; Share</button>
     <button class="chip danger" id="clear-list" type="button">Clear</button>
   </div>
-</div>
 <div class="meta">
   &#128205; Store Location: <b>__LOCATION__</b><br>
   __VALID_LINE__
@@ -1219,8 +1226,21 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
   var DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   var NL = String.fromCharCode(10);
 
-  // BC Tax Rates by category (groceries 0%, health/OTC/vitamins ~5% GST, general merchandise 12% GST+PST)
-  var BC_TAX_RATES = { groceries: 0, health: 0.05, appliances: 0.12, electronics: 0.12, household: 0.12, clothing: 0.12, home: 0.12, other: 0.12 };
+  // Rough BC tax estimate (GST 5% + PST 7%). Basic groceries 0%; snack/candy/pop/prepared food GST only;
+  // vitamins/OTC and kids' clothing GST only (PST exempt); everything else 12%.
+  var SNACK_RE = /\b(chips?|crisps|doritos|lays|ruffles|pringles|cheetos|tostitos|popcorn|pretzels?|candy|candies|gumm(?:y|ies)|chocolates?|licorice|marshmallows?|gum|granola bars?|protein bars?|cereal bars?|snack bars?|clif|rxbar|kind bars?|nature valley|trail mix|snack mix|soda|pop|coke|coca-?cola|pepsi|sprite|7up|ginger ale|root beer|dr\.? pepper|sparkling|carbonated|seltzer|kombucha|energy drinks?|red bull|monster|celsius|alani|bubly|perrier|pellegrino|popsicles?|ice cream bars?|rotisserie|sushi|sandwich(?:es)?|party tray|platter)\b/i;
+  var PERSONAL_RE = /\b(shampoo|conditioner|razors?|shav(?:e|ing)|deodorant|antiperspirant|sunscreen|sunblock|lotion|moisturizer|cleanser|body wash|face wash|soap|(?:face|body|hand|eye|night) cream|lip balm|toothpaste|mouthwash|floss|toothbrush|cosmetics?|makeup|perfume|hair|nail)\b/i;
+  var KIDS_RE = /\b(kids?|child(?:ren)?|boys?|girls?|youth|toddler|infant|baby)\b/i;
+  var DIAPER_RE = /\bdiapers?\b/i;
+
+  function taxRate(name, cat) {
+    var n = name || '';
+    if (DIAPER_RE.test(n)) return 0.05;
+    if (cat === 'groceries') return SNACK_RE.test(n) ? 0.05 : 0;
+    if (cat === 'health') return PERSONAL_RE.test(n) ? 0.12 : 0.05;
+    if (cat === 'clothing') return KIDS_RE.test(n) ? 0.05 : 0.12;
+    return 0.12;
+  }
 
   function load(key, fallback) {
     try {
@@ -1276,7 +1296,10 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
   var expBtn = document.getElementById('exp-toggle');
   var repBtn = document.getElementById('rep-toggle');
   var sortSel = document.getElementById('sort');
-  var catBtns = Array.prototype.slice.call(document.querySelectorAll('[data-cat]'));
+  var catBtns = Array.prototype.slice.call(document.querySelectorAll('button[data-cat]'));
+  var filtersToggle = document.getElementById('filters-toggle');
+  var filtersPanel = document.getElementById('filters-panel');
+  var filtersCount = document.getElementById('filters-count');
 
   var listBar = document.getElementById('list-bar');
   var listSum = document.getElementById('list-sum');
@@ -1795,7 +1818,7 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
       var item = savedMap[id];
       var qty = item.qty || 1;
       var p = item.price;
-      var rate = BC_TAX_RATES[item.cat || 'other'] || 0;
+      var rate = taxRate(item.name, item.cat || 'other');
       if (item.status === 'cart') {
         cartCount++;
         if (item.got) gotCount++;
@@ -1850,6 +1873,12 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
     updateWeekBtnLabel();
     setToggle(expBtn, state.hideExp);
     setToggle(repBtn, state.hideRep);
+
+    var activeFilters = (state.newOnly ? 1 : 0) + (state.saleOnly ? 1 : 0) + (state.atlOnly ? 1 : 0) +
+      (state.clrOnly ? 1 : 0) + (state.weekMode ? 1 : 0) + (state.hideExp ? 1 : 0) +
+      (state.hideRep ? 1 : 0) + (state.activeCat ? 1 : 0);
+    filtersCount.textContent = activeFilters ? ' (' + activeFilters + ')' : '';
+    filtersToggle.classList.toggle('active', activeFilters > 0);
 
     catBtns.forEach(function (btn) {
       setToggle(btn, state.activeCat === btn.getAttribute('data-cat'));
@@ -2093,6 +2122,11 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
     b.addEventListener('click', function () { setCols(Number(b.getAttribute('data-cols'))); });
   });
   setCols(Number(load(COLS_KEY, 2)));
+
+  filtersToggle.addEventListener('click', function () {
+    filtersPanel.hidden = !filtersPanel.hidden;
+    filtersToggle.setAttribute('aria-expanded', filtersPanel.hidden ? 'false' : 'true');
+  });
 
   function onScroll() {
     var y = window.pageYOffset || document.documentElement.scrollTop || 0;
