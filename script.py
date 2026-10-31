@@ -347,7 +347,6 @@ REG_RE = re.compile(
 PCT_OFF_RE = re.compile(r"\b(\d{1,2})\s*%\s*off\b", re.I)
 FLYER_RE = re.compile(r"costco\s*1", re.I)
 
-# 1. High-priority multi-word overrides checked first to prevent category hijacking
 CATEGORY_OVERRIDES = (
     (re.compile(r"\b(sound\s*bar|apple\s*watch|apple\s*tv|apple\s*airpods?|apple\s*ipad|apple\s*macbook|apple\s*pencil|surge\s*protector|power\s*bank|dash\s*cam|memory\s*card|sd\s*card|gift\s*card)\b", re.I), "electronics"),
     (re.compile(r"\b(water\s*flosser|waterpik|body\s*butter|body\s*wash|hand\s*soap|hand\s*cream|face\s*cream|eye\s*cream|shave\s*cream|shaving\s*cream|lip\s*balm|tea\s*tree|epsom\s*salt|milk\s*thistle|protein\s*powder|whey\s*protein|collagen\s*peptides?|electrolyte\s*powder|liquid\s*i\.?v\.?|contact\s*lens|heating\s*pad)\b", re.I), "health"),
@@ -356,7 +355,6 @@ CATEGORY_OVERRIDES = (
     (re.compile(r"\b(water\s*pitcher|brita|air\s*purifier|water\s*cooler|ice\s*maker|coffee\s*maker|espresso\s*machine|rice\s*cooker|slow\s*cooker|pressure\s*cooker|air\s*fryer|stand\s*mixer|hand\s*mixer|immersion\s*blender|food\s*processor|food\s*saver|vacuum\s*sealer|bread\s*maker|waffle\s*maker)\b", re.I), "appliances"),
 )
 
-# 2. Expanded keyword rules (scored by total keyword matches)
 CATEGORY_RULES = {
     "groceries": re.compile(
         r"\b(coffee|espresso\s*beans|k-?cup|nescafe|starbucks|tim\s*hortons|tea|matcha|chai|kombucha|"
@@ -1057,8 +1055,8 @@ PAGE_TEMPLATE = """<!doctype html>
 
   .card a { display:block; width:100%; }
   .card img { width:100%; aspect-ratio:1/1; object-fit:contain; display:block; background:#fff; }
-  .card figcaption { padding:.5rem .6rem; font-size:.84rem; line-height:1.3; width:100%; overflow-wrap:anywhere; cursor:pointer; flex-grow:1; }
-  .card-footer { padding:.4rem .6rem .55rem; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.3rem;
+  .card figcaption { padding:.6rem .8rem; font-size:.86rem; line-height:1.35; width:100%; overflow-wrap:anywhere; cursor:pointer; flex-grow:1; }
+  .card-footer { padding:.5rem .8rem .6rem; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.4rem;
                  border-top:1px solid var(--line); font-size:.78rem; width:100%; }
 
   .card-actions { display:flex; align-items:center; gap:.3rem; flex-wrap:wrap; }
