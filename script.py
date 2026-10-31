@@ -1468,6 +1468,7 @@ __CARDS__
 <div class="db-results" id="db-results" hidden></div>
 <p class="empty" id="no-match" hidden></p>
 </main>
+<p style="text-align:center;margin:2rem 0 5rem;opacity:.7;font-size:.8rem;"><button type="button" class="mini-btn" id="cat-export">Export category fixes</button></p>
 
 <div class="modal-overlay" id="sku-modal" hidden>
   <div class="modal">
@@ -2466,6 +2467,19 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });
   onScroll();
+
+  var catExport = document.getElementById('cat-export');
+  catExport.addEventListener('click', function () {
+    var skus = {};
+    Object.keys(overrides).forEach(function (k) { if (k.indexOf('sku:') === 0) skus[k.slice(4)] = overrides[k]; });
+    var text = JSON.stringify({ skus: skus, words: {} }, null, 2);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        catExport.textContent = 'Copied ' + Object.keys(skus).length + ' fixes!';
+        setTimeout(function () { catExport.textContent = 'Export category fixes'; }, 2000);
+      });
+    } else { window.prompt('Copy into category_overrides.json:', text); }
+  });
 
   applySort();
   render();
