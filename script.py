@@ -966,7 +966,7 @@ def maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, items, exclu
     send_email(subj, "\n".join(lines))
 
 
-PAGE_TEMPLATE = """<!doctype html>
+PAGE_TEMPLATE = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -1053,6 +1053,19 @@ PAGE_TEMPLATE = """<!doctype html>
   .card.is-got figcaption { text-decoration:line-through; opacity:.55; }
   .card.is-got img { opacity:.45; filter:grayscale(80%); }
 
+  /* Badges overlaid on the item photo */
+  .new-tag, .tags-right { position:absolute; z-index:2; pointer-events:none; }
+  .new-tag { top:8px; left:8px; background:var(--highlight-border); color:#fff; font-size:.72rem; font-weight:800;
+             padding:2px 8px; border-radius:999px; box-shadow:0 1px 4px rgba(0,0,0,.4); white-space:nowrap; }
+  .new-tag.carry { background:#0d6efd; }
+  .new-tag.custom { background:#6f42c1; }
+  .tags-right { top:8px; right:8px; display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
+  .disc-tag, .atl-tag, .clr-tag { color:#fff; font-size:.74rem; font-weight:800; line-height:1.3; padding:2px 8px;
+                                  border-radius:999px; box-shadow:0 1px 4px rgba(0,0,0,.4); white-space:nowrap; }
+  .disc-tag { background:var(--danger); }
+  .atl-tag { background:#f76707; }
+  .clr-tag { background:#7048e8; }
+
   .card a { display:block; width:100%; }
   .card img { width:100%; aspect-ratio:1/1; object-fit:contain; display:block; background:#fff; }
   .card figcaption { padding:.6rem .8rem; font-size:.86rem; line-height:1.35; width:100%; overflow-wrap:anywhere; cursor:pointer; flex-grow:1; }
@@ -1103,6 +1116,9 @@ PAGE_TEMPLATE = """<!doctype html>
     .sort-select { font-size:.71rem; padding:.2rem .4rem; }
     .grid { padding:0 .5rem; gap:.5rem; }
     .grid.c2 .card figcaption { font-size:.73rem; padding:.38rem .45rem; }
+    .grid.c2 .new-tag, .grid.c2 .disc-tag, .grid.c2 .atl-tag, .grid.c2 .clr-tag { font-size:.64rem; padding:1px 6px; }
+    .grid.c2 .new-tag { top:5px; left:5px; }
+    .grid.c2 .tags-right { top:5px; right:5px; gap:3px; }
     .grid.c2 .card-footer { padding:.32rem .45rem .45rem; font-size:.71rem; }
     .title { font-size:.92rem; }
     .meta { padding:0 .6rem; }
@@ -1235,6 +1251,12 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
     return (h >>> 0).toString(36);
   }
 
+  function esc(v) {
+    return String(v === null || v === undefined ? '' : v).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
   var q = document.getElementById('q');
   var quickAdd = document.getElementById('quick-add');
   var quickAddLabel = document.getElementById('quick-add-label');
@@ -1349,12 +1371,12 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
       ? '<div class="new-tag custom">&#9998; Custom</div>'
       : '<div class="new-tag carry">&#128204; Saved Item</div>';
     var imgPart = item.url
-      ? '<a href="' + item.url + '" target="_blank" rel="noopener"><img src="' + item.url + '" alt="" loading="lazy" referrerpolicy="no-referrer"></a>'
+      ? '<a href="' + esc(item.url) + '" target="_blank" rel="noopener"><img src="' + esc(item.url) + '" alt="" loading="lazy" referrerpolicy="no-referrer"></a>'
       : '';
-    var skuPart = item.sku ? '<span class="sku-badge">#' + item.sku + '</span>' : '';
+    var skuPart = item.sku ? '<span class="sku-badge">#' + esc(item.sku) + '</span>' : '';
     
     // Ensure name and price display nicely in captions and compact rows
-    var displayName = item.name || id;
+    var displayName = esc(item.name || id);
     var pTxt = (item.price !== null && item.price !== undefined && displayName.indexOf('$') === -1)
       ? ' ($' + Number(item.price).toFixed(2) + ')'
       : '';
@@ -1364,10 +1386,10 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
       '<figcaption>' + displayName + pTxt + '</figcaption>' +
       '<div class="card-footer">' +
         '<div class="card-actions">' +
-          '<label class="shop-label"><input type="checkbox" class="shop-check" data-ident="' + id + '"> Cart</label>' +
-          '<button type="button" class="mini-btn next-item-btn" data-ident="' + id + '" title="Save for next week">&#128204; Next</button>' +
-          '<button type="button" class="mini-btn qty-btn" data-ident="' + id + '" hidden>&times;1</button>' +
-          '<button type="button" class="mini-btn got-btn" data-ident="' + id + '" hidden>&#10003;</button>' +
+          '<label class="shop-label"><input type="checkbox" class="shop-check" data-ident="' + esc(id) + '"> Cart</label>' +
+          '<button type="button" class="mini-btn next-item-btn" data-ident="' + esc(id) + '" title="Save for next week">&#128204; Next</button>' +
+          '<button type="button" class="mini-btn qty-btn" data-ident="' + esc(id) + '" hidden>&times;1</button>' +
+          '<button type="button" class="mini-btn got-btn" data-ident="' + esc(id) + '" hidden>&#10003;</button>' +
         '</div>' +
         '<span class="foot-right">' + skuPart + '<span class="end-badge" hidden></span></span>' +
       '</div>';
@@ -1704,7 +1726,7 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
       });
 
       if (!matches.length) {
-        dbResults.innerHTML = '<h4>No matches found in your database for "' + term + '". Use "+ Add to Cart" above for a custom entry!</h4>';
+        dbResults.innerHTML = '<h4>No matches found in your database for "' + esc(term) + '". Use "+ Add to Cart" above for a custom entry!</h4>';
         return;
       }
 
@@ -1714,14 +1736,14 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
         var lastHist = e.history && e.history.length ? e.history[e.history.length - 1] : null;
         var lastPrice = lastHist ? lastHist.price : (e.price !== undefined ? e.price : null);
         var priceTxt = lastPrice !== null ? '$' + Number(lastPrice).toFixed(2) + (lastHist ? ' (seen ' + lastHist.date + ')' : '') : 'No price recorded';
-        var imgTag = e.url ? '<img src="' + e.url + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : '';
-        html += '<div class="db-row" data-dbid="' + m.id + '">' +
+        var imgTag = e.url ? '<img src="' + esc(e.url) + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : '';
+        html += '<div class="db-row" data-dbid="' + esc(m.id) + '">' +
                   '<div style="display:flex;align-items:center;gap:.55rem;min-width:0;">' + imgTag +
-                    '<div style="overflow:hidden;text-overflow:ellipsis;"><b>' + (e.name || m.id) + '</b><br><span style="color:var(--muted);">' + priceTxt + ' &middot; <span style="text-transform:capitalize;">' + (e.cat || 'other') + '</span></span></div>' +
+                    '<div style="overflow:hidden;text-overflow:ellipsis;"><b>' + esc(e.name || m.id) + '</b><br><span style="color:var(--muted);">' + priceTxt + ' &middot; <span style="text-transform:capitalize;">' + esc(e.cat || 'other') + '</span></span></div>' +
                   '</div>' +
                   '<div style="display:flex;gap:.3rem;flex-shrink:0;">' +
-                    '<button type="button" class="chip active db-add-cart" data-id="' + m.id + '">+ Cart</button>' +
-                    '<button type="button" class="chip next-active db-add-next" data-id="' + m.id + '">&#128204; Next</button>' +
+                    '<button type="button" class="chip active db-add-cart" data-id="' + esc(m.id) + '">+ Cart</button>' +
+                    '<button type="button" class="chip next-active db-add-next" data-id="' + esc(m.id) + '">&#128204; Next</button>' +
                   '</div>' +
                 '</div>';
       });
@@ -2272,7 +2294,7 @@ def render_html(
         .replace("__STAMP__", stamp)
         .replace("__SOURCE_URL__", esc(source_url, quote=True))
         .replace("__SOURCE_NAME__", source_name)
-        .replace("__EMBEDD_HIST__", json.dumps(embedded_hist, separators=(",", ":")))
+        .replace("__EMBEDDED_HIST__", json.dumps(embedded_hist, separators=(",", ":")))
         .replace("__CARDS__", cards_html)
     )
 
