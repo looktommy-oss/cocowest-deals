@@ -49,6 +49,27 @@ SALES_POST_RE = re.compile(r"(costco[-_\s]+flyer|sale[-_\s]+items)", re.I)
 
 FUZZY_THRESHOLD = 0.92
 
+TZ = ZoneInfo("America/Vancouver")
+STATE_FILE = os.getenv("STATE_FILE")  # optional local copy of state.json (checked out from gh-pages)
+
+# ---- Polling windows (Vancouver time; weekday: Mon=0 ... Sun=6) -------------
+# The workflow cron is deliberately wider than these windows (so it survives the
+# PST/PDT clock change); this table is what actually decides whether to poll.
+def _hm(h, m=0):
+    return h * 60 + m
+
+
+MONDAY_WINDOWS = {  # Monday sales post; Tue/Wed are holiday fallbacks
+    0: [(_hm(15), _hm(21))],
+    1: [(_hm(8), _hm(9)), (_hm(15), _hm(21))],
+    2: [(_hm(8), _hm(9)), (_hm(15), _hm(21))],
+}
+WEEKEND_WINDOWS = {  # weekend update; Saturday is the fallback
+    4: [(_hm(13), _hm(21))],
+    5: [(_hm(8), _hm(9)), (_hm(15), _hm(21))],
+}
+HUNT_GRACE_MIN = 20  # GitHub cron runs can start late; allow this much past a window's end
+
 CHALLENGE_MARKERS = (
     "just a moment",
     "cf-browser-verification",
@@ -994,6 +1015,11 @@ def apply_categories(items, price_db: dict, overrides: dict):
 
 
 def load_previous_state(scraper):
+    if STATE_FILE and Path(STATE_FILE).is_file():
+        try:
+            return json.loads(Path(STATE_FILE).read_text(encoding="utf-8")), True
+        except Exception as exc:
+            print(f"[state] could not read {STATE_FILE}: {exc!r}", file=sys.stderr)
     if not STATE_URL:
         print("[state] no site URL known; skipping state check")
         return {}, False
@@ -1078,10 +1104,16 @@ def build_digest(items, exclusive, is_weekend_mode):
     return "\n\n".join(sections)
 
 
-def maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, items, exclusive):
+def maybe_notify(
+    prev_state, state_ok, target_url, is_weekend_mode, items, exclusive, valid_range=None
+):
     force = os.getenv("FORCE_NOTIFY") == "1"
     key = "weekend_url" if is_weekend_mode else "flyer_url"
-    is_new_post = target_url != prev_state.get(key)
+    prev_range = state_progress(prev_state)["weekend" if is_weekend_mode else "monday"][0]
+    # CocoWest has reused a URL for a new week, so a changed date range counts too.
+    is_new_post = target_url != prev_state.get(key) or bool(
+        valid_range and prev_range and valid_range != prev_range
+    )
     if not (force or (is_new_post and state_ok)):
         print("[email] not sending notification")
         return
@@ -1105,6 +1137,96 @@ def maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, items, exclu
     else:
         subj = f"CocoWest: Monday Sales Post ({items_count} items){best_txt}"
     send_email(subj, "\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# Polling gate: decide whether this scheduled run needs to touch CocoWest at all
+# ---------------------------------------------------------------------------
+def now_vancouver() -> datetime:
+    forced = os.getenv("HUNT_NOW")  # testing only, e.g. HUNT_NOW=2026-11-02T16:00
+    if forced:
+        return datetime.fromisoformat(forced).replace(tzinfo=TZ)
+    return datetime.now(TZ)
+
+
+def in_window(now: datetime, windows: dict) -> bool:
+    mins = now.hour * 60 + now.minute
+    return any(
+        start <= mins <= end + HUNT_GRACE_MIN
+        for start, end in windows.get(now.weekday(), ())
+    )
+
+
+def _iso_date(v):
+    try:
+        return date.fromisoformat(v) if v else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _state_range(v):
+    if isinstance(v, (list, tuple)) and len(v) == 2:
+        a, b = _iso_date(v[0]), _iso_date(v[1])
+        if a and b:
+            return (a, b)
+    return None
+
+
+def state_progress(prev: dict) -> dict:
+    """(captured range, date we captured it) for each post type, from state.json."""
+    legacy = _state_range(prev.get("valid"))
+    mode = prev.get("mode")
+    mon = _state_range(prev.get("flyer_range")) or (legacy if mode == "flyer" else None)
+    wk = _state_range(prev.get("weekend_range")) or (legacy if mode == "weekend" else None)
+    return {
+        "monday": (mon, _iso_date(prev.get("flyer_seen"))),
+        "weekend": (wk, _iso_date(prev.get("weekend_seen"))),
+    }
+
+
+def have_current(rng, seen, range_floor, seen_floor) -> bool:
+    if rng:
+        return rng[1] >= range_floor
+    return seen is not None and seen >= seen_floor
+
+
+def week_marks(today: date):
+    monday = today - timedelta(days=today.weekday())
+    return monday, monday + timedelta(days=4), monday + timedelta(days=6)
+
+
+def hunt_needs(now: datetime, prev: dict) -> set:
+    """Which posts are we still waiting for, right now? Empty set = don't poll."""
+    monday, friday, sunday = week_marks(now.date())
+    prog = state_progress(prev)
+    need = set()
+    if in_window(now, MONDAY_WINDOWS) and not have_current(*prog["monday"], monday, monday):
+        need.add("monday")
+    if in_window(now, WEEKEND_WINDOWS) and not have_current(*prog["weekend"], sunday, friday):
+        need.add("weekend")
+    return need
+
+
+def posts_ready(need, monday_url, weekend_url, ranges, prev, today) -> set:
+    """Of the posts we're waiting for, which are on the homepage now?"""
+    monday, _friday, sunday = week_marks(today)
+    ready = set()
+    if "monday" in need and monday_url:
+        rng = ranges.get("monday")
+        if (rng and rng[1] >= monday) or (not rng and monday_url != prev.get("flyer_url")):
+            ready.add("monday")
+    if "weekend" in need and weekend_url:
+        rng = ranges.get("weekend")
+        if (rng and rng[1] >= sunday) or (not rng and weekend_url != prev.get("weekend_url")):
+            ready.add("weekend")
+    return ready
+
+
+def set_output(name: str, value: str) -> None:
+    path = os.getenv("GITHUB_OUTPUT")
+    if path:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"{name}={value}\n")
 
 
 PAGE_TEMPLATE = r"""<!doctype html>
@@ -1339,7 +1461,6 @@ PAGE_TEMPLATE = r"""<!doctype html>
   &#128205; Store Location: <b>__LOCATION__</b><br>
   __VALID_LINE__
   Showing <b id="shown-count">__TOTAL__</b> of <b>__TOTAL__</b> items &middot; updated __STAMP__<br>
-  <span id="cat-fixes" hidden>&#127991;&#65039; <b id="cat-fixes-n">0</b> category fixes saved on this device &middot; <button type="button" class="mini-btn" id="cat-fixes-copy">Copy as overrides</button><br></span>
   Source: <a href="__SOURCE_URL__">__SOURCE_NAME__</a>
 </div>
 <main class="grid c2" id="grid">
@@ -1479,9 +1600,6 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
   var overrides = load(OV_KEY, {});
   if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) overrides = {};
   var modalCatRow = document.getElementById('modal-cat-row');
-  var catFixesEl = document.getElementById('cat-fixes');
-  var catFixesN = document.getElementById('cat-fixes-n');
-  var catFixesCopy = document.getElementById('cat-fixes-copy');
 
   function ovKey(el) {
     var sku = el.getAttribute('data-sku');
@@ -1617,12 +1735,6 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
     }).catch(function () { cb({}); });
   }
 
-  function updateFixesNote() {
-    var n = Object.keys(overrides).length;
-    catFixesEl.hidden = n === 0;
-    catFixesN.textContent = n;
-  }
-
   function setCategory(id, val) {
     var m = cardMetaMap[id];
     if (!m) return;
@@ -1633,7 +1745,6 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
     m.cat = cat;
     m.el.setAttribute('data-cat', cat);
     if (savedMap[id]) { savedMap[id].cat = cat; save(STORE_KEY, savedMap); }
-    updateFixesNote();
     render();
   }
 
@@ -2013,15 +2124,6 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
     if (state.activeCat && !counts[state.activeCat]) state.activeCat = '';
   }
 
-  catFixesCopy.addEventListener('click', function () {
-    var skus = {};
-    Object.keys(overrides).forEach(function (k) { if (k.indexOf('sku:') === 0) skus[k.slice(4)] = overrides[k]; });
-    var text = JSON.stringify({ skus: skus, words: {} }, null, 2);
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(function () { catFixesCopy.textContent = 'Copied!'; setTimeout(function () { catFixesCopy.textContent = 'Copy as overrides'; }, 1600); });
-    } else { window.prompt('Copy into category_overrides.json:', text); }
-  });
-
   function render() {
     updateCatCounts();
     var t = q.value.trim().toLowerCase();
@@ -2365,7 +2467,6 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
   });
   onScroll();
 
-  updateFixesNote();
   applySort();
   render();
 })();
@@ -2566,12 +2667,48 @@ def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     scraper = make_scraper()
 
-    today = datetime.now(ZoneInfo("America/Vancouver")).date()
-    weekend_forced = bool(os.getenv("WEEKEND_URL"))
-    ranges = {}
-    monday_url, weekend_url = os.getenv("MONDAY_URL"), os.getenv("WEEKEND_URL")
+    now = now_vancouver()
+    today = now.date()
+    scheduled = os.getenv("GITHUB_EVENT_NAME") == "schedule"
+
+    # Our own saved state comes first: no CocoWest traffic needed to read it.
+    prev_state, state_ok = load_previous_state(scraper)
+
+    env_weekend = os.getenv("WEEKEND_URL")
+    weekend_forced = bool(env_weekend)
+    monday_url, weekend_url, ranges = os.getenv("MONDAY_URL"), env_weekend, {}
+    home = None
+
+    if scheduled:
+        # Scheduled runs only poll while a post is still missing, and only inside
+        # the windows above. Manual runs and local runs skip this gate entirely.
+        need = hunt_needs(now, prev_state)
+        if not need:
+            print(
+                f"[gate] {now:%a %H:%M} Vancouver: nothing to wait for "
+                "(outside a window, or this week's post is already captured). "
+                "No request made."
+            )
+            set_output("deploy", "false")
+            return 0
+        print(f"[gate] {now:%a %H:%M} Vancouver: waiting for {', '.join(sorted(need))}")
+        try:
+            home = fetch(scraper, BASE_URL, retries=2)  # a single, light request
+        except RuntimeError as exc:
+            print(f"::warning::CocoWest homepage check failed ({exc}); will try again next run")
+            set_output("deploy", "false")
+            return 0
+        d_monday, d_weekend, d_ranges = discover_posts(home)
+        ready = posts_ready(need, d_monday, d_weekend, d_ranges, prev_state, today)
+        if not ready:
+            print("[gate] not posted yet; leaving the site alone.")
+            set_output("deploy", "false")
+            return 0
+        print(f"[gate] new post detected: {', '.join(sorted(ready))}")
+
     if not monday_url:
-        home = fetch(scraper, BASE_URL)
+        if home is None:
+            home = fetch(scraper, BASE_URL)
         monday_url, weekend_url, ranges = discover_posts(home)
 
     if not monday_url:
@@ -2634,8 +2771,6 @@ def main() -> int:
     valid_range = weekend_range if is_weekend_mode else monday_range
     stale = (not is_weekend_mode) and bool(monday_range) and monday_range[1] < today
 
-    prev_state, state_ok = load_previous_state(scraper)
-
     apply_categories(target_items, prev_state.get("price_db") or {}, load_category_overrides())
 
     seen_ids = previous_ids(prev_state, mode, target_url)
@@ -2658,15 +2793,40 @@ def main() -> int:
 
     (OUTPUT_DIR / "index.html").write_text(html_content, encoding="utf-8")
 
+    # Progress markers the polling gate reads on the next run.
+    prog = state_progress(prev_state)
+
+    def captured(url_now, url_prev, rng_now, rng_prev, seen_prev):
+        changed = url_now != url_prev or bool(rng_now and rng_now != rng_prev)
+        if changed:
+            return today.isoformat()
+        return seen_prev.isoformat() if seen_prev else None
+
+    def rng_json(rng):
+        return [rng[0].isoformat(), rng[1].isoformat()] if rng else None
+
+    flyer_rng, flyer_seen = monday_range, captured(
+        monday_url, prev_state.get("flyer_url"), monday_range, *prog["monday"]
+    )
+    if is_weekend_mode:
+        wk_rng, wk_seen = weekend_range, captured(
+            weekend_url, prev_state.get("weekend_url"), weekend_range, *prog["weekend"]
+        )
+    else:  # keep whatever we last captured; the weekend post is still outstanding
+        wk_rng = prog["weekend"][0]
+        wk_seen = prog["weekend"][1].isoformat() if prog["weekend"][1] else None
+
     (OUTPUT_DIR / "state.json").write_text(
         json.dumps(
             {
                 "weekend_url": weekend_url if is_weekend_mode else None,
                 "flyer_url": monday_url,
                 "mode": mode,
-                "valid": [valid_range[0].isoformat(), valid_range[1].isoformat()]
-                if valid_range
-                else None,
+                "valid": rng_json(valid_range),
+                "flyer_range": rng_json(flyer_rng),
+                "flyer_seen": flyer_seen,
+                "weekend_range": rng_json(wk_rng),
+                "weekend_seen": wk_seen,
                 "total_count": len(target_items),
                 "exclusive_count": len(exclusive),
                 "updated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -2678,7 +2838,10 @@ def main() -> int:
         encoding="utf-8",
     )
 
-    maybe_notify(prev_state, state_ok, target_url, is_weekend_mode, target_items, exclusive)
+    maybe_notify(
+        prev_state, state_ok, target_url, is_weekend_mode, target_items, exclusive, valid_range
+    )
+    set_output("deploy", "true")
     return 0
 
 
