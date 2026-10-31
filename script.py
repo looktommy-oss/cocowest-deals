@@ -561,6 +561,7 @@ class Item:
     end_date: str = field(init=False, default="")
     ident: str = field(init=False, default="")
     is_flyer: bool = field(init=False, default=False)
+    cat_src: str = field(init=False, default="rule")
 
     def __post_init__(self):
         cleaned = strip_savings(self.label)
@@ -824,6 +825,7 @@ def update_price_db(prev_state, target_items, valid_range):
         entry["name"] = i.label
         entry["url"] = i.url
         entry["cat"] = i.category
+        entry["learned"] = i.cat_src == "learned"
         if i.item_no:
             entry["item_no"] = i.item_no
 
@@ -850,6 +852,105 @@ def is_all_time_low(it: Item, price_db: dict) -> bool:
         h["price"] for h in entry.get("history", []) if h.get("price") is not None
     ]
     return len(prices) >= 2 and max(prices) > it.price and it.price <= min(prices)
+
+
+CATEGORY_KEYS = set(CATEGORY_RULES) | {"other"}
+LEARN_STOP_WORDS = {
+    "kirkland", "signature", "pack", "count", "instant", "savings", "expires", "the", "and",
+    "with", "for", "size", "sizes", "pieces", "pcs", "item", "per", "each", "from", "new",
+}
+
+
+def load_category_overrides():
+    """Optional hand-edited category_overrides.json: {"skus": {"1234567": "health"}, "words": {"mandu": "groceries"}}"""
+    out = {"skus": {}, "words": {}}
+    path = Path(os.getenv("CATEGORY_OVERRIDES", "category_overrides.json"))
+    if not path.is_file():
+        return out
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[categories] could not read {path}: {exc!r}", file=sys.stderr)
+        return out
+    for kind in ("skus", "words"):
+        for k, v in (data.get(kind) or {}).items():
+            if v in CATEGORY_KEYS:
+                out[kind][str(k).lower() if kind == "words" else str(k)] = v
+    return out
+
+
+def word_tokens(label: str) -> set:
+    text = PAREN_RE.sub(" ", label or "").lower()
+    toks = set()
+    for t in re.findall(r"[a-z][a-z'\-]{2,}", text):
+        t = t.strip("'-")
+        if len(t) > 4 and t.endswith("s"):
+            t = t[:-1]
+        if len(t) >= 3 and t not in LEARN_STOP_WORDS:
+            toks.add(t)
+    return toks
+
+
+def build_word_votes(price_db: dict) -> dict:
+    votes = {}
+    for entry in price_db.values():
+        cat = entry.get("cat")
+        if not cat or cat == "other" or entry.get("learned"):
+            continue
+        for t in word_tokens(entry.get("name", "")):
+            votes.setdefault(t, Counter())[cat] += 1
+    return votes
+
+
+def learn_category(item: Item, price_db: dict, votes: dict):
+    entry = price_db.get(f"no:{item.item_no}") if item.item_no else None
+    if entry and entry.get("cat") not in (None, "other") and not entry.get("learned"):
+        return entry["cat"], "sku"
+    scores = Counter()
+    for t in word_tokens(item.label):
+        c = votes.get(t)
+        if not c:
+            continue
+        total = sum(c.values())
+        cat, n = c.most_common(1)[0]
+        if total >= 2 and n / total >= 0.8:
+            scores[cat] += total
+    top = scores.most_common(2)
+    if top and top[0][1] >= 3 and (len(top) == 1 or top[0][1] >= 2 * top[1][1]):
+        return top[0][0], "learned"
+    return None
+
+
+def apply_categories(items, price_db: dict, overrides: dict):
+    votes = build_word_votes(price_db)
+    n_over = n_sku = n_learned = 0
+    for it in items:
+        sku_cat = overrides["skus"].get(it.item_no) if it.item_no else None
+        if sku_cat:
+            it.category, it.cat_src = sku_cat, "override"
+            n_over += 1
+            continue
+        if it.category != "other":
+            continue
+        word_cat = next(
+            (overrides["words"][t] for t in sorted(word_tokens(it.label)) if t in overrides["words"]),
+            None,
+        )
+        if word_cat:
+            it.category, it.cat_src = word_cat, "override"
+            n_over += 1
+            continue
+        res = learn_category(it, price_db, votes)
+        if res:
+            it.category, it.cat_src = res
+            if res[1] == "sku":
+                n_sku += 1
+            else:
+                n_learned += 1
+    print(
+        f"[categories] overrides={n_over} reused-by-SKU={n_sku} learned-by-words={n_learned} "
+        f"still-other={sum(1 for i in items if i.category == 'other')}"
+    )
 
 
 def load_previous_state(scraper):
@@ -1102,6 +1203,8 @@ PAGE_TEMPLATE = r"""<!doctype html>
   .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.6); backdrop-filter:blur(4px); z-index:100; display:flex; align-items:center; justify-content:center; padding:1rem; }
   .modal { background:var(--card); color:var(--fg); border-radius:14px; max-width:450px; width:100%; max-height:85vh; overflow-y:auto; padding:1.2rem; box-shadow:0 8px 24px rgba(0,0,0,.3); position:relative; }
   .modal-close { position:absolute; top:12px; right:12px; border:none; background:none; font-size:1.4rem; cursor:pointer; color:var(--muted); }
+  .cat-row { display:flex; align-items:center; gap:.5rem; font-size:.85rem; font-weight:600; margin:.2rem 0 .4rem; }
+  .cat-row select { flex:1; min-width:0; border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:8px; padding:.3rem .45rem; font-size:.85rem; }
   .hist-list { list-style:none; padding:0; margin:.8rem 0 0; }
   .hist-item { display:flex; justify-content:space-between; padding:.5rem 0; border-bottom:1px solid var(--line); font-size:.85rem; }
 
@@ -1196,6 +1299,7 @@ PAGE_TEMPLATE = r"""<!doctype html>
   &#128205; Store Location: <b>__LOCATION__</b><br>
   __VALID_LINE__
   Showing <b id="shown-count">__TOTAL__</b> of <b>__TOTAL__</b> items &middot; updated __STAMP__<br>
+  <span id="cat-fixes" hidden>&#127991;&#65039; <b id="cat-fixes-n">0</b> category fixes saved on this device &middot; <button type="button" class="mini-btn" id="cat-fixes-copy">Copy as overrides</button><br></span>
   Source: <a href="__SOURCE_URL__">__SOURCE_NAME__</a>
 </div>
 <main class="grid c2" id="grid">
@@ -1208,6 +1312,7 @@ __CARDS__
   <div class="modal">
     <button class="modal-close" id="modal-close">&times;</button>
     <h3 id="modal-title" style="margin-top:0;">Price History</h3>
+    <div id="modal-cat-row"></div>
     <div id="modal-body">Loading SKU history...</div>
   </div>
 </div>
@@ -1325,6 +1430,23 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
   var origOrder = cards.slice();
   var cardMetaMap = {};
   var hashToIdent = {};
+
+  var OV_KEY = 'cocowest_cat_overrides';
+  var CATS = [['groceries', 'Groceries'], ['household', 'Household'], ['health', 'Health'], ['home', 'Home'],
+              ['appliances', 'Appliances'], ['electronics', 'Electronics'], ['clothing', 'Clothing'], ['other', 'Other']];
+  var CAT_LABEL = {};
+  CATS.forEach(function (c) { CAT_LABEL[c[0]] = c[1]; });
+  var overrides = load(OV_KEY, {});
+  if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) overrides = {};
+  var modalCatRow = document.getElementById('modal-cat-row');
+  var catFixesEl = document.getElementById('cat-fixes');
+  var catFixesN = document.getElementById('cat-fixes-n');
+  var catFixesCopy = document.getElementById('cat-fixes-copy');
+
+  function ovKey(el) {
+    var sku = el.getAttribute('data-sku');
+    return sku ? 'sku:' + sku : 'id:' + el.getAttribute('data-ident');
+  }
 
   function num(el, attr) {
     var v = parseFloat(el.getAttribute(attr));
@@ -1455,9 +1577,44 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
     }).catch(function () { cb({}); });
   }
 
+  function updateFixesNote() {
+    var n = Object.keys(overrides).length;
+    catFixesEl.hidden = n === 0;
+    catFixesN.textContent = n;
+  }
+
+  function setCategory(id, val) {
+    var m = cardMetaMap[id];
+    if (!m) return;
+    var key = ovKey(m.el);
+    if (val) overrides[key] = val; else delete overrides[key];
+    save(OV_KEY, overrides);
+    var cat = val || m.autoCat;
+    m.cat = cat;
+    m.el.setAttribute('data-cat', cat);
+    if (savedMap[id]) { savedMap[id].cat = cat; save(STORE_KEY, savedMap); }
+    updateFixesNote();
+    render();
+  }
+
+  function renderCatRow(id) {
+    var m = cardMetaMap[id];
+    if (!m) { modalCatRow.innerHTML = ''; return; }
+    var cur = overrides[ovKey(m.el)] || '';
+    var html = '<label class="cat-row">Category <select id="modal-cat">' +
+      '<option value="">Auto (' + esc(CAT_LABEL[m.autoCat] || m.autoCat) + ')</option>';
+    CATS.forEach(function (c) {
+      html += '<option value="' + c[0] + '"' + (cur === c[0] ? ' selected' : '') + '>' + c[1] + '</option>';
+    });
+    html += '</select></label>';
+    modalCatRow.innerHTML = html;
+    document.getElementById('modal-cat').addEventListener('change', function (e) { setCategory(id, e.target.value); });
+  }
+
   function showHistoryModal(ident, name, sku) {
     modalTitle.textContent = name;
     modal.hidden = false;
+    renderCatRow(ident);
     var ext = sku ? '<p style="font-size:.8rem;margin-top:.8rem;text-align:right;"><a href="https://www.cocowest.ca/?s=' + encodeURIComponent(sku) + '" target="_blank" rel="noopener" style="color:var(--accent);">Search #' + sku + ' on CocoWest &rarr;</a></p>' : '';
 
     function renderHist(histArr) {
@@ -1491,6 +1648,9 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
     var url = el.getAttribute('data-url') || '';
     var name = el.getAttribute('data-name') || '';
     var sku = el.getAttribute('data-sku') || '';
+    var autoCat = el.getAttribute('data-cat') || 'other';
+    var ovCat = overrides[ovKey(el)];
+    if (ovCat && CAT_LABEL[ovCat]) el.setAttribute('data-cat', ovCat);
     var sEnd = el.getAttribute('data-end');
     var badge = el.querySelector('.end-badge');
     if (sEnd && badge) {
@@ -1510,6 +1670,7 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
       el: el,
       t: el.getAttribute('data-t') || '',
       cat: el.getAttribute('data-cat') || 'other',
+      autoCat: autoCat,
       price: num(el, 'data-price'),
       disc: num(el, 'data-disc'),
       end: sEnd || '',
@@ -1796,7 +1957,33 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
     searchHistBtn.addEventListener('click', runPastCatalogSearch);
   }
 
+  function updateCatCounts() {
+    var counts = {};
+    origOrder.forEach(function (el) {
+      var m = cardMetaMap[el.getAttribute('data-ident')];
+      if (!m || m.isCarry) return;
+      counts[m.cat] = (counts[m.cat] || 0) + 1;
+    });
+    catBtns.forEach(function (btn) {
+      var c = btn.getAttribute('data-cat');
+      var span = btn.querySelector('.cnt');
+      if (span) span.textContent = counts[c] || 0;
+      btn.hidden = !counts[c];
+    });
+    if (state.activeCat && !counts[state.activeCat]) state.activeCat = '';
+  }
+
+  catFixesCopy.addEventListener('click', function () {
+    var skus = {};
+    Object.keys(overrides).forEach(function (k) { if (k.indexOf('sku:') === 0) skus[k.slice(4)] = overrides[k]; });
+    var text = JSON.stringify({ skus: skus, words: {} }, null, 2);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { catFixesCopy.textContent = 'Copied!'; setTimeout(function () { catFixesCopy.textContent = 'Copy as overrides'; }, 1600); });
+    } else { window.prompt('Copy into category_overrides.json:', text); }
+  });
+
   function render() {
+    updateCatCounts();
     var t = q.value.trim().toLowerCase();
     quickAdd.hidden = t.length === 0;
     if (t.length > 0) {
@@ -2138,6 +2325,7 @@ window.__PAGE_HIST__ = __EMBEDDED_HIST__;
   });
   onScroll();
 
+  updateFixesNote();
   applySort();
   render();
 })();
@@ -2153,6 +2341,7 @@ CAT_ICONS = (
     ("appliances", "&#129368;", "Appliances"),
     ("electronics", "&#128187;", "Electronics"),
     ("clothing", "&#128084;", "Clothing"),
+    ("other", "&#128230;", "Other"),
 )
 
 
@@ -2185,10 +2374,10 @@ def render_html(
     cat_btns = []
     for cat_key, icon, title in CAT_ICONS:
         cnt = cat_counts.get(cat_key, 0)
-        if cnt > 0:
-            cat_btns.append(
-                f'<button class="chip" data-cat="{cat_key}" type="button" aria-pressed="false" title="{title}">{icon} {cnt}</button>'
-            )
+        hid = "" if cnt else " hidden"
+        cat_btns.append(
+            f'<button class="chip" data-cat="{cat_key}" type="button" aria-pressed="false" title="{title}"{hid}>{icon} <span class="cnt">{cnt}</span></button>'
+        )
     cat_btns_html = "\n    ".join(cat_btns)
 
     if valid_range and stale:
@@ -2406,6 +2595,8 @@ def main() -> int:
     stale = (not is_weekend_mode) and bool(monday_range) and monday_range[1] < today
 
     prev_state, state_ok = load_previous_state(scraper)
+
+    apply_categories(target_items, prev_state.get("price_db") or {}, load_category_overrides())
 
     seen_ids = previous_ids(prev_state, mode, target_url)
     ids = sorted({i.ident for i in target_items})
