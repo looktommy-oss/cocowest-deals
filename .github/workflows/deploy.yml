@@ -2,31 +2,25 @@ name: Update CocoWest New Deals
 
 on:
   schedule:
-    # GitHub Actions uses UTC.
-    # BC is permanently on Pacific Time (UTC-7) year-round.
+    # GitHub cron is UTC only, and BC switches between PDT (UTC-7) and PST (UTC-8).
+    # These slots are deliberately a little wider than the real windows so they
+    # work all year with no edits. script.py checks Vancouver time and exits
+    # instantly (no request to CocoWest) outside the windows below.
     #
-    # Monday: 4:00pm, 4:30pm, 5:00pm, 5:30pm, 6:00pm, 8:00pm
-    # = Monday UTC 23:00, 23:30, Tuesday UTC 00:00, 00:30, 01:00, 03:00
-    - cron: '0,30 23 * * 1'
-    - cron: '0,30 0 * * 2'
-    - cron: '0 1,3 * * 2'
+    # Monday post  : Mon 3pm-9pm, then Tue and Wed 8am-9am and 3pm-9pm, every 30 min
+    # Weekend post : Fri 1pm-9pm, then Sat 8am-9am and 3pm-9pm, every 30 min
+    # Each hunt stops as soon as that week's post is captured.
 
-    # Tuesday: 1:00pm, 2:00pm, 4:00pm, 4:30pm, 5:00pm, 5:30pm, 6:00pm, 8:00pm
-    # = Tuesday UTC 20:00, 21:00, 23:00, 23:30, Wednesday UTC 00:00, 00:30, 01:00, 03:00
-    - cron: '0 20,21,23 * * 2'
-    - cron: '30 23 * * 2'
-    - cron: '0,30 0 * * 3'
-    - cron: '0 1,3 * * 3'
-
-    # Friday: 2:00pm, 4:00pm, 7:00pm
-    # = Friday UTC 21:00, 23:00, Saturday UTC 02:00
-    - cron: '0 21,23 * * 5'
-
-    # Friday 5:30pm = Saturday UTC 00:30
-    - cron: '30 0 * * 6'
-
-    # Saturday Fallbacks: 10:00am, 2:00pm = Saturday UTC 17:00, 21:00
-    - cron: '0 2,17,21 * * 6'
+    # Evening windows, first part (Mon, Tue, Wed, Sat), UTC 22:00-23:30
+    - cron: '0,30 22,23 * * 1,2,3,6'
+    # Evening windows, after UTC midnight (Tue, Wed, Thu, Sat, Sun), UTC 00:00-05:00
+    - cron: '0,30 0-4 * * 0,2,3,4,6'
+    - cron: '0 5 * * 0,2,3,4,6'
+    # Morning windows (Tue, Wed, Sat), UTC 15:00-17:00
+    - cron: '0,30 15,16 * * 2,3,6'
+    - cron: '0 17 * * 2,3,6'
+    # Friday afternoon/evening start, UTC 20:00-23:30
+    - cron: '0,30 20-23 * * 5'
 
   workflow_dispatch:
     inputs:
@@ -38,12 +32,27 @@ on:
 permissions:
   contents: write
 
+# Never let two runs overlap (they would both write to gh-pages).
+concurrency:
+  group: cocowest-update
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
+      # Read last run's state.json straight from the gh-pages branch: exact, and
+      # not subject to GitHub Pages caching delays. Fine if the branch doesn't exist yet.
+      - name: Load previous state
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: gh-pages
+          path: prev-site
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -54,26 +63,30 @@ jobs:
         run: pip install cloudscraper beautifulsoup4
 
       - name: Run scraper script
+        id: scrape
         env:
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
           FORCE_NOTIFY: ${{ inputs.force_notify && '1' || '0' }}
+          STATE_FILE: prev-site/state.json
         run: python -u script.py
 
+      # script.py writes deploy=true only when it captured a new post (or on a
+      # manual run). Idle and "not posted yet" runs stop here.
       - name: Verify output exists
+        if: steps.scrape.outputs.deploy == 'true'
         run: |
           if [ ! -f public/index.html ]; then
             echo "ERROR: public/index.html was not created by script.py"
             echo "Files in repo root:"
             ls -la
-            echo "Last lines of script.py:"
-            tail -n 5 script.py
             exit 1
           fi
           ls -la public
 
       - name: Deploy to GitHub Pages
+        if: steps.scrape.outputs.deploy == 'true'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
