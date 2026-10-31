@@ -376,6 +376,31 @@ CATEGORY_OVERRIDES = (
     (re.compile(r"\b(water\s*pitchers?|brita|air\s*purifiers?|water\s*coolers?|ice\s*makers?|coffee\s*makers?|espresso\s*machines?|rice\s*cookers?|slow\s*cookers?|pressure\s*cookers?|air\s*fryers?|stand\s*mixers?|hand\s*mixers?|immersion\s*blenders?|food\s*processors?|food\s*savers?|vacuum\s*sealers?|bread\s*makers?|waffle\s*makers?)\b", re.I), "appliances"),
 )
 
+CATEGORY_OVERRIDES += (
+    (re.compile(r"\b(omnibook|elitebook|probook|zbook|galaxy\s*book|surface\s*(?:pro|laptop|go)|thinkpad|ideapad|vivobook|zenbook|chromebook|macbook)\b", re.I), "electronics"),
+)
+
+# Fallbacks for labels with no keyword hits. CocoWest labels are often cut short
+# ("SAMSUNG 75U8000H 75" - no "TV"), so these key off brands, model codes and pack sizes.
+ITEM_NO_PREFIX_RE = re.compile(r"^\s*\d{5,8}\s+")
+ELEC_BRAND_RE = re.compile(
+    r"\b(samsung|tcl|lg|sony|hisense|vizio|panasonic|philips|sharp|toshiba|hp|dell|lenovo|asus|acer|msi|"
+    r"microsoft|surface|apple|google|pixel|bose|jbl|sennheiser|logitech|razer|corsair|garmin|gopro|dji|"
+    r"canon|nikon|epson|anker|ecoflow|jackery|tp-?link|netgear|eufy|roku|sonos|insignia)\b",
+    re.I,
+)
+# TV/monitor model codes: 2-digit size, a few letters, a few digits (75U8000H, 65M8L, 65QNED7SB, 55A400U).
+# The letter class skips X so pack sizes like "28X90G" can't match.
+TV_MODEL_RE = re.compile(r"\b\d{2}[A-WYZ]{1,5}\d{1,4}[A-Z]{0,3}\b", re.I)
+JEWELRY_RE = re.compile(
+    r"\b(?:\d{1,2}\s*kt|\d{1,2}\s*k\s+(?:gold|white|yellow|rose)|karat|gold|silver|platinum|pearls?|sapphire|"
+    r"emerald|ruby|opal|gemstones?|carat|ct\.?\s*tw|solitaire|moissanite|tanzanite|jade|amethyst|topaz|"
+    r"aquamarine|garnet|peridot)\b",
+    re.I,
+)
+PACK_SIZE_RE = re.compile(r"\b\d+\s*x\s*\d+(?:\.\d+)?\s*(?:kg|g|ml|l|oz|fl\s*oz)\b", re.I)
+WEAK_NON_FOOD_CUES = {"pack", "bag", "salt", "seed", "pen", "led", "hat", "saw", "game", "book", "throw", "mat"}
+
 CATEGORY_RULES = {
     "groceries": re.compile(
         r"\b(coffee|espresso\s*beans|k-?cup|nescafe|starbucks|tim\s*hortons|lavazza|kicking\s*horse|zavida|tea|matcha|chai|kombucha|"
@@ -516,7 +541,7 @@ ELEC_UNIT_RE = re.compile(
 )
 # Food weight/volume fallback when no other non-grocery category matched
 FOOD_UNIT_RE = re.compile(
-    r"\b(?:\d+\s*x\s*)?\d+(?:\.\d+)?\s*(?:kg|g\b|grams?|lb|lbs|oz)\b",
+    r"\b(?:\d+\s*x\s*)?\d+(?:\.\d+)?\s*(?:kg|g\b|grams?|lb|lbs|oz|ml|l)\b",
     re.I,
 )
 NON_FOOD_CUE_RE = re.compile(
@@ -549,8 +574,19 @@ def detect_category(label: str) -> str:
     if scores:
         return scores.most_common(1)[0][0]
 
-    # Fallback: if an unclassified item has a food weight (e.g. "454 G", "1.2 KG") and no non-food cues, it's almost certainly a grocery item
-    if FOOD_UNIT_RE.search(clean) and not NON_FOOD_CUE_RE.search(clean):
+    # Fallbacks, tried in order, only when no keyword matched at all.
+    if JEWELRY_RE.search(clean):
+        return "clothing"  # jewelry lives with the clothing chip
+
+    bare = ITEM_NO_PREFIX_RE.sub("", clean)  # drop the leading item number
+    if TV_MODEL_RE.search(bare) or (ELEC_BRAND_RE.search(bare) and re.search(r"\d", bare)):
+        return "electronics"
+
+    # Food weight/volume (e.g. "454 G", "12 X 60 ML") with no real non-food cues.
+    cues = {c.lower() for c in NON_FOOD_CUE_RE.findall(clean)}
+    if PACK_SIZE_RE.search(clean):
+        cues -= WEAK_NON_FOOD_CUES  # "VARIETY PACK 28 X 90 G" is food, not a pack of something else
+    if FOOD_UNIT_RE.search(clean) and not cues:
         return "groceries"
 
     return "other"
