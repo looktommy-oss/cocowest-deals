@@ -60,14 +60,15 @@ def _hm(h, m=0):
 
 
 MONDAY_WINDOWS = {  # Monday sales post; Tue/Wed are holiday fallbacks
-    0: [(_hm(15), _hm(21))],
-    1: [(_hm(8), _hm(9)), (_hm(15), _hm(21))],
-    2: [(_hm(8), _hm(9)), (_hm(15), _hm(21))],
+    0: [(_hm(15), _hm(23))],
+    1: [(_hm(8), _hm(9)), (_hm(15), _hm(23))],
+    2: [(_hm(8), _hm(9)), (_hm(15), _hm(23))],
 }
 WEEKEND_WINDOWS = {  # weekend update; Saturday is the fallback
-    4: [(_hm(13), _hm(21))],
-    5: [(_hm(8), _hm(9)), (_hm(15), _hm(21))],
+    4: [(_hm(13), _hm(23))],
+    5: [(_hm(8), _hm(9)), (_hm(15), _hm(23))],
 }
+
 HUNT_GRACE_MIN = 20  # GitHub cron runs can start late; allow this much past a window's end
 
 CHALLENGE_MARKERS = (
