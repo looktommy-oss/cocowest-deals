@@ -2,20 +2,18 @@ name: Update CocoWest New Deals
 
 on:
   schedule:
-    # GitHub cron is UTC only, and BC switches between PDT (UTC-7) and PST (UTC-8).
-    # These slots are deliberately a little wider than the real windows so they
-    # work all year with no edits. script.py checks Vancouver time and exits
-    # instantly (no request to CocoWest) outside the windows below.
+    # GitHub cron is UTC only (BC is on UTC-7 year-round).
+    # script.py checks Vancouver time and exits instantly (no request to
+    # CocoWest) outside the windows below or once the week's post is captured.
     #
-    # Monday post  : Mon 3pm-9pm, then Tue and Wed 8am-9am and 3pm-9pm, every 30 min
-    # Weekend post : Fri 1pm-9pm, then Sat 8am-9am and 3pm-9pm, every 30 min
-    # Each hunt stops as soon as that week's post is captured.
+    # Monday post  : Mon 3pm-11pm, then Tue and Wed 8am-9am and 3pm-11pm, every 30 min
+    # Weekend post : Fri 1pm-11pm, then Sat 8am-9am and 3pm-11pm, every 30 min
 
     # Evening windows, first part (Mon, Tue, Wed, Sat), UTC 22:00-23:30
     - cron: '0,30 22,23 * * 1,2,3,6'
-    # Evening windows, after UTC midnight (Tue, Wed, Thu, Sat, Sun), UTC 00:00-05:00
-    - cron: '0,30 0-4 * * 0,2,3,4,6'
-    - cron: '0 5 * * 0,2,3,4,6'
+    # Evening windows, after UTC midnight (Tue, Wed, Thu, Sat, Sun), UTC 00:00-06:00
+    - cron: '0,30 0-5 * * 0,2,3,4,6'
+    - cron: '0 6 * * 0,2,3,4,6'
     # Morning windows (Tue, Wed, Sat), UTC 15:00-17:00
     - cron: '0,30 15,16 * * 2,3,6'
     - cron: '0 17 * * 2,3,6'
