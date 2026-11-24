@@ -232,10 +232,10 @@ def reconcile_range(title_range, pub_date):
 def weekend_over(rng, forced: bool, today, monday_range=None) -> bool:
     if forced or not rng:
         return False
+    if monday_range and monday_range[0] > rng[0]:
+        return True
     if rng[1] >= today:
         return False
-    if monday_range and monday_range[0] > rng[1]:
-        return True
     return today > rng[1] + timedelta(days=1)
 
 
