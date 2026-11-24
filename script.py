@@ -42,7 +42,7 @@ WEEKEND_RE = re.compile(
     os.getenv("WEEKEND_RE", r"weekend[-_\s]*(?:sales[-_\s]*)?update"), re.I
 )
 IGNORE_RE = re.compile(
-    r"(seasonal|electronics|food[-_\s]review|review|recall|contest|clothing|executive|black[-_\s]friday|boxing[-_\s]day)",
+    r"(seasonal|electronics|food[-_\s]review|review|recall|contest|clothing|executive)",
     re.I,
 )
 SALES_POST_RE = re.compile(r"(costco[-_\s]+flyer|sale[-_\s]+items)", re.I)
