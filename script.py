@@ -39,7 +39,8 @@ if SITE_URL and not SITE_URL.endswith("/"):
 STATE_URL = SITE_URL + "state.json" if SITE_URL else ""
 
 WEEKEND_RE = re.compile(
-    os.getenv("WEEKEND_RE", r"weekend[-_\s]*(?:sales[-_\s]*)?update"), re.I
+    os.getenv("WEEKEND_RE", r"(?:weekend[-_\s]+(?:[\w-]+[-_\s]+){0,3}update|sales?[-_\s]+update)"),
+    re.I,
 )
 IGNORE_RE = re.compile(
     r"(seasonal|electronics|food[-_\s]review|review|recall|contest|clothing|executive)",
